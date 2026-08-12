@@ -19,6 +19,24 @@
 
 ---
 
+## 2026-08-12 T-001 Reviewer再検証・完了
+
+### 実施内容
+- 前回の修正（High: advanced_overrides未反映バグ、Low: release_msマジックナンバー）に対し、別のReviewerセッションが再検証を実施した。Developerの報告を鵜呑みにせず、xvfb環境でDeveloperとは異なるパラメータ（AGC・コンプレッサー・EQ・ノイズ段それぞれ）を使って`config.json`からの復元を再現し、`app.chain`側の実パラメータが保存値と一致することを確認した。あわせて通常のスライダー操作によるリアルタイム反映（既存の正常動作）に回帰がないことも確認した。
+- 両指摘とも解消(CONFIRMED)、新たな問題（回帰・エッジケース漏れ）は検出されなかった。
+- Reviewerから追加のLow/任意提案（GUI(app.py)のadvanced_overrides反映ロジックへの自動回帰テスト追加）があったが、要件・セキュリティ・データ整合性に影響しないためREVIEW.mdの過剰指摘抑制ルールに従い必須修正とせず、docs/tasks.mdのバックログへ記録するに留めた。
+- `docs/tasks.md`のT-001を「完了」に更新した。
+
+### 結果
+- Reviewer再検証: High/Low指摘とも解消(CONFIRMED)。`pytest tests/` 26 passed（再実行、リグレッションなし）。
+- 完了条件（AGENTS.md）の充足状況: 要件達成・エラーなし・コードレビュー済みはこのLinux環境で確認済み。「動作確認済み」のうちDSPロジック・GUIロジックの構造的動作はこの環境で自動テスト・xvfb検証済みだが、SoloCast実機でのキャプチャ・VB-Cable経由のDiscordでの実際の聞こえ方はこの環境では検証不可能なため未実施（D-001に記載済みの既知の制約）。WINDOWS_VERIFICATION_CHECKLIST.mdに沿ったユーザー側での最終確認をもって完全な完了とする。
+
+### 次回開始位置
+- ユーザーがWindows実機でWINDOWS_VERIFICATION_CHECKLIST.mdを実施し、問題があれば新規タスクとして起票する。
+- バックログの2項目（GUI自動回帰テストの追加、Windows実機確認）は優先度未確定。
+
+---
+
 ## 2026-08-12 T-001 Reviewer差し戻し対応（advanced_overrides未反映バグの修正）
 
 ### 実施内容

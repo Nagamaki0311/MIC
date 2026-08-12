@@ -15,11 +15,12 @@
 
 | ID | タスク | 優先度 | 状態 | 担当エージェント | 備考 |
 |----|--------|--------|------|------------------|------|
-| T-001 | HyperX SoloCast向け軽量ボイスプロセッサの開発 | 高 | レビュー中 | claude | Reviewer差し戻し(advanced_overrides未反映バグ)の修正完了、再レビュー待ち（D-003参照）。自動テスト26件pass。Windows実機での動作確認は未実施（WINDOWS_VERIFICATION_CHECKLIST.md）。詳細はdocs/progress.md参照 |
+| T-001 | HyperX SoloCast向け軽量ボイスプロセッサの開発 | 高 | 完了 | claude | Reviewer再検証で修正2件（High/Low）とも解消(CONFIRMED)、回帰なし、自動テスト26件pass。Windows実機・Discordでの動作確認はこのLinux環境では実施不可能なため未実施、WINDOWS_VERIFICATION_CHECKLIST.mdに沿ったユーザー側での最終確認が別途必要（D-001〜D-003参照） |
 
 ## バックログ（未着手・優先度未確定）
 
-- （ここに新しいタスク候補を追記する）
+- GUI(app.py)のadvanced_overrides反映ロジックに対する自動回帰テストの追加（Reviewer提案、Low/任意、要件・セキュリティに影響しないため見送り中）
+- WINDOWS_VERIFICATION_CHECKLIST.mdに沿ったユーザー側でのWindows実機・Discord動作確認（未実施）
 
 ## メモ
 
