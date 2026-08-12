@@ -73,7 +73,7 @@ class AudioEngine:
     def start(self) -> None:
         if self._stream is not None:
             return
-        self._stream = sd.Stream(
+        stream = sd.Stream(
             samplerate=SAMPLE_RATE,
             blocksize=FRAME_SIZE,
             dtype="float32",
@@ -81,7 +81,16 @@ class AudioEngine:
             device=(self.input_device, self.output_device),
             callback=self._callback,
         )
-        self._stream.start()
+        try:
+            stream.start()
+        except Exception:
+            # Pa_OpenStream(sd.Stream(...))は成功したがPa_StartStream(.start())が
+            # 失敗したケース。sounddevice.Streamに__del__は無くGCでも解放されない
+            # ため、ここでcloseしないとPaStreamハンドルがリークする(Reviewer指摘2)。
+            # self._streamへは代入前なので、失敗時に参照が残らないようにする。
+            stream.close()
+            raise
+        self._stream = stream
 
     def stop(self) -> None:
         if self._stream is not None:

@@ -130,3 +130,101 @@ class TestLoadHandlesCorruptedConfig:
             json.dump({"preset": "natural", "some_future_field": 123}, f)
         loaded = AppConfig.load(path)
         assert loaded.preset == "natural"
+
+
+class TestAdvancedOverridesRejectNonFiniteValues:
+    """Reviewer指摘1(High, CONFIRMED)への対応。
+
+    json.load()はJSONの`NaN`/`Infinity`/`-Infinity`トークンをそのまま
+    float('nan')/float('inf')等として読み戻す。この値がtk.Scale.set()に渡ると
+    TclErrorでアプリ起動が落ち、config.jsonを直さない限り毎回再現していた。
+    """
+
+    def test_nan_value_is_dropped_but_other_keys_are_kept(self, tmp_path):
+        path = str(tmp_path / "config.json")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write('{"advanced_overrides": {"agc_target_dbfs": NaN, "compressor_ratio": 2.5}}')
+        loaded = AppConfig.load(path)
+        assert "agc_target_dbfs" not in loaded.advanced_overrides
+        assert loaded.advanced_overrides == {"compressor_ratio": 2.5}
+
+    def test_positive_infinity_value_is_dropped(self, tmp_path):
+        path = str(tmp_path / "config.json")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write('{"advanced_overrides": {"agc_max_gain_db": Infinity, "agc_target_dbfs": -17.0}}')
+        loaded = AppConfig.load(path)
+        assert "agc_max_gain_db" not in loaded.advanced_overrides
+        assert loaded.advanced_overrides == {"agc_target_dbfs": -17.0}
+
+    def test_negative_infinity_value_is_dropped(self, tmp_path):
+        path = str(tmp_path / "config.json")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write('{"advanced_overrides": {"compressor_threshold_db": -Infinity}}')
+        loaded = AppConfig.load(path)
+        assert loaded.advanced_overrides == {}
+
+    def test_save_rejects_nan_in_advanced_overrides(self, tmp_path):
+        """書き込み側でも有限性を防御する(信頼境界の両側での検証)。"""
+        config_dir = tmp_path / "config_dir"
+        config_dir.mkdir()
+        path = str(config_dir / "config.json")
+        cfg = AppConfig(advanced_overrides={"agc_target_dbfs": float("nan")})
+        with pytest.raises(ValueError):
+            cfg.save(path)
+        # 失敗時に一時ファイルを残さない(既存のアトミック書き込みの保証と両立する)。
+        assert not os.path.exists(path)
+        assert os.listdir(config_dir) == []
+
+    def test_save_rejects_infinity_in_advanced_overrides(self, tmp_path):
+        path = str(tmp_path / "config.json")
+        cfg = AppConfig(advanced_overrides={"agc_max_gain_db": float("inf")})
+        with pytest.raises(ValueError):
+            cfg.save(path)
+
+
+class TestAdvancedOverridesPartialValidity:
+    """Reviewer指摘4(Low, CONFIRMED)への対応。
+
+    1項目でも不正だと辞書全体を破棄するall-or-nothingではなく、不正なキーだけを
+    取り除き、ユーザーが調整した他の正当な設定は保持する。
+    """
+
+    def test_one_invalid_key_does_not_discard_the_rest(self, tmp_path):
+        path = str(tmp_path / "config.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "advanced_overrides": {
+                        "agc_target_dbfs": -17.0,
+                        "compressor_ratio": "bad-type",
+                    }
+                },
+                f,
+            )
+        loaded = AppConfig.load(path)
+        assert loaded.advanced_overrides == {"agc_target_dbfs": -17.0}
+
+    def test_multiple_invalid_keys_are_all_dropped_independently(self, tmp_path):
+        path = str(tmp_path / "config.json")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(
+                '{"advanced_overrides": {'
+                '"agc_target_dbfs": -17.0, '
+                '"compressor_ratio": "bad", '
+                '"agc_max_gain_db": NaN, '
+                '"compressor_threshold_db": -20.0'
+                "}}"
+            )
+        loaded = AppConfig.load(path)
+        assert loaded.advanced_overrides == {
+            "agc_target_dbfs": -17.0,
+            "compressor_threshold_db": -20.0,
+        }
+
+    def test_non_string_key_is_dropped(self):
+        # JSONオブジェクトのキーは常に文字列だが、_sanitize_advanced_overrides自体は
+        # 単独でも安全であるべき(将来の呼び出し元変化に対する防御)ことを直接確認する。
+        from soloclarity.config import _sanitize_advanced_overrides
+
+        result = _sanitize_advanced_overrides({"agc_target_dbfs": -17.0, 42: 1.0})
+        assert result == {"agc_target_dbfs": -17.0}

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import platform
 import threading
+import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Optional
@@ -20,6 +21,11 @@ from soloclarity.dsp.chain import VoiceChain
 from soloclarity.gui.meter_widget import MeterWidget
 
 TEST_PREVIEW_SECONDS = 3.0
+# テストボタンのworker thread(録音+再生)の完了を`_on_close`で待つ際の上限。
+# 録音(TEST_PREVIEW_SECONDS)+再生+デバイスI/Oの余裕を見込む。
+TEST_THREAD_JOIN_TIMEOUT_SECONDS = TEST_PREVIEW_SECONDS * 2 + 5.0
+# `_on_close`がworker threadの完了を待つ間、self.update()を呼ぶ間隔。
+TEST_THREAD_POLL_INTERVAL_SECONDS = 0.01
 
 # 詳細設定スライダーの定義: (キー, ラベル, 最小, 最大, 刻み)
 ADVANCED_SLIDER_SPECS: tuple[tuple[str, str, float, float, float], ...] = (
@@ -40,6 +46,17 @@ ADVANCED_SLIDER_SPECS: tuple[tuple[str, str, float, float, float], ...] = (
     ("agc_max_gain_db", "AGC Max Gain (dB)", 0.0, 24.0, 0.5),
 )
 
+# キー -> (最小, 最大)。config.json経由で範囲外の極端な値が注入された場合に、
+# tk.Scale.set()の暗黙のクランプ挙動に頼らず明示的にクランプするために使う
+# (Reviewer指摘5)。
+_ADVANCED_SLIDER_RANGES: dict[str, tuple[float, float]] = {
+    key: (lo, hi) for key, _label, lo, hi, _res in ADVANCED_SLIDER_SPECS
+}
+
+
+def _clamp(value: float, lo: float, hi: float) -> float:
+    return min(max(value, lo), hi)
+
 
 class App(tk.Tk):
     def __init__(self):
@@ -56,6 +73,7 @@ class App(tk.Tk):
             self.destroy()
             raise RuntimeError(f"音声処理エンジンの初期化に失敗しました: {exc}") from exc
         self.engine: Optional[AudioEngine] = None
+        self._test_thread: Optional[threading.Thread] = None
 
         self._input_devices = device_lib.list_input_devices()
         self._output_devices = device_lib.list_output_devices()
@@ -318,7 +336,10 @@ class App(tk.Tk):
     def _apply_advanced_overrides(self, overrides: dict) -> None:
         for key, value in overrides.items():
             if key in self._advanced_sliders:
-                self._advanced_sliders[key].set(value)
+                lo, hi = _ADVANCED_SLIDER_RANGES[key]
+                # tk.Scale.set()は範囲外の値を暗黙にクランプするが、それに頼らず
+                # ここで明示的にクランプする(Reviewer指摘5)。
+                self._advanced_sliders[key].set(_clamp(value, lo, hi))
         if overrides:
             self._apply_slider_values_to_chain()
 
@@ -374,17 +395,25 @@ class App(tk.Tk):
         self.test_status_var.set("録音中...")
 
         def worker():
+            # このworkerはバックグラウンドスレッドで動く。Tkinterウィジェットの
+            # 直接操作はスレッドセーフでないため、_on_meter_update等と同様に
+            # self.after(0, ...)経由でメインスレッドへ処理を戻す(Reviewer指摘3)。
             try:
                 audio = record_and_process_preview(self.chain, input_device, TEST_PREVIEW_SECONDS)
-                self.test_status_var.set("再生中...")
+                self.after(0, lambda: self.test_status_var.set("再生中..."))
                 play_preview(audio, output_device)
-                self.test_status_var.set("完了")
+                self.after(0, lambda: self.test_status_var.set("完了"))
             except Exception as exc:  # デバイスエラー等をGUIに表示するため広く捕捉する
-                self.test_status_var.set(f"エラー: {exc}")
+                # `except ... as exc`はブロック終了時に暗黙で`del exc`されるため、
+                # after(0, ...)で遅延実行するlambdaがexcを直接参照するとNameErrorに
+                # なる。先にメッセージへ変換してから閉じ込める。
+                message = str(exc)
+                self.after(0, lambda: self.test_status_var.set(f"エラー: {message}"))
             finally:
-                self.test_button.configure(state="normal")
+                self.after(0, lambda: self.test_button.configure(state="normal"))
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._test_thread = threading.Thread(target=worker, daemon=True)
+        self._test_thread.start()
 
     @staticmethod
     def _device_index_by_name(devices, name: str) -> Optional[int]:
@@ -439,6 +468,22 @@ class App(tk.Tk):
 
     def _on_close(self) -> None:
         self._save_config()
+        if self._test_thread is not None and self._test_thread.is_alive():
+            # テスト再生のworker threadが`self.chain`を使用中に`chain.close()`と
+            # 競合しないよう、閉じる前に完了を待つ(構造的にレースを避ける。
+            # Reviewer指摘3)。
+            #
+            # 単純な`Thread.join()`ではなく`self.update()`を挟みながらポーリングする
+            # 必要がある: workerが`self.after(0, ...)`でメインスレッドに処理を戻そうと
+            # した際、Tclはメインスレッドがイベントループを実際に処理していることを
+            # 要求する。メインスレッドが素の`join()`でブロックしたままだと、worker側の
+            # `after()`呼び出しがメインスレッドの応答を待って停止し、双方が互いを
+            # 待ち続ける状態になることを実機検証で確認した。`update()`でイベントを
+            # 処理し続けることでworkerのafter()呼び出しを解放し、正しく完了させる。
+            deadline = time.monotonic() + TEST_THREAD_JOIN_TIMEOUT_SECONDS
+            while self._test_thread.is_alive() and time.monotonic() < deadline:
+                self.update()
+                time.sleep(TEST_THREAD_POLL_INTERVAL_SECONDS)
         self._stop_engine()
         self.chain.close()
         self.destroy()

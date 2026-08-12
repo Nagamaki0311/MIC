@@ -189,3 +189,34 @@
 - 新規テストファイル: `app/tests/test_config.py`（12件）、`app/tests/test_engine.py`（5件）、`app/tests/test_devices.py`（2件）、`app/tests/test_app_gui.py`（7件、xvfb環境）、`app/tests/soak_chain.py`（1件、個別実行）。既存ファイルへの追加: `test_chain.py`（+3件）、`test_gate.py`（+6件）。
 - `app/tests/conftest.py`に`gui_display`フィクスチャを追加した。`DISPLAY`が未設定でもLinux上に`Xvfb`があれば自動的に一時ディスプレイを起動し、無ければGUIテストをスキップする（新規pip依存を追加せず、既存のシステムバイナリのみで完結させる設計）。
 - 今後、config.jsonのフィールドを追加する場合は`_FIELD_VALIDATORS`にも対応するバリデータを追加すること。AudioEngineに新しいコールバックを追加する場合も、GUI側のスレッド安全性（`self.after(0, ...)`経由でのメインスレッド復帰）を踏襲すること。
+
+---
+
+## D-006: T-003 Reviewer指摘対応（High×2, Medium×1, Low×2, すべてCONFIRMED）
+
+- 日付: 2026-08-12
+- 状態: 採用
+
+### 背景
+- D-005の実装（コミット913189c）に対し、別セッションのReviewerが独立に敵対的検証を行い、5件の指摘（High×2, Medium×1, Low×2）を返した。いずれも実際にコード・挙動を確認した上でのCONFIRMED判定であり、Managerの指示に従いすべて対応した。
+
+### 決定
+
+1. **advanced_overridesへのNaN混入によるアプリ恒久起動不能（High, CONFIRMED）**: `config.py`の`_is_valid_advanced_override_value`（旧`_is_valid_advanced_overrides`）に`math.isfinite(value)`チェックを追加し、NaN/Infinity/-Infinityをすべて拒否するようにした。JSONの`NaN`/`Infinity`/`-Infinity`トークンはPythonの`json.load`のデフォルト設定でそのまま`float('nan')`等として読み戻され、`tk.Scale.set(nan)`が`TclError`を送出して`App.__init__`から`main()`の`except Exception`まで伝播していた（起動失敗はするが、config.json側のNaN値を修復する処理が無いため次回起動時も確実に再現していた）。あわせて`AppConfig.save()`側にも`json.dump(..., allow_nan=False)`を追加し、書き込み・読み込み両方の信頼境界で有限性を防御するようにした（万一有限でない値がセルフに紛れ込んでも、書き込み時点で早期に`ValueError`となり、壊れた`config.json`が生成されることはない）。`tests/test_config.py::TestAdvancedOverridesRejectNonFiniteValues`（NaN/Infinity/-Infinityそれぞれの読み込み側フォールバック、save側のValueError）で確認した。
+2. **`AudioEngine.start()`でのPa_StartStream失敗時のストリームハンドルリーク（High, CONFIRMED）**: `start()`を、`sd.Stream(...)`(Pa_OpenStream相当)をローカル変数`stream`に受け、`.start()`(Pa_StartStream相当)をtry/exceptで囲み、失敗時は`stream.close()`してから例外を再送出し、成功時のみ`self._stream = stream`とする実装に変更した。`sounddevice.Stream`に`__del__`は無くGCでも解放されないため、修正前は開いたストリームがリークし、`self._stream`への参照も残らないため追跡・再利用の手段が完全に失われていた。Issueが名指しした「エンジンの高頻度start/stop」で他アプリとのデバイス排他競合等によりPa_StartStreamのみが繰り返し失敗するケースを想定し、`tests/test_engine.py::TestStartClosesStreamOnPaStartStreamFailure`で、単発の失敗時に`close()`が呼ばれ`self._stream`が`None`のままであること、成功時は`close()`が呼ばれないこと、50回連続で失敗させても毎回`close()`されリークが蓄積しないことを確認した（`sd.Stream`をフェイクに差し替えて検証）。
+3. **テストボタンworker threadのTkinter操作がself.after()経由でない（Medium, CONFIRMED/PLAUSIBLE）**: `_on_test_clicked`のworker関数内`self.test_status_var.set(...)`/`self.test_button.configure(...)`をすべて`self.after(0, lambda: ...)`経由に変更し、`_on_meter_update`/`_on_engine_error`と同じスレッドセーフなパターンに統一した。あわせて`_on_close()`で、テストボタンのworker threadが実行中の場合は`self.chain.close()`する前に完了を待つようにし、`chain.process()`(worker内)と`chain.close()`(メインスレッド)が競合する構造的リスクを避けた。
+   - **実装上の重要な追加検証**: 当初`self._test_thread.join(timeout=...)`という単純なブロッキング待機で実装したところ、Reviewerとの往復（コンテキスト切れによる引き継ぎを含む）の中で、xvfb実機検証により**単純な`join()`では正しく機能しないことが判明した**。Tkinterの`self.after(0, ...)`をバックグラウンドスレッドから呼ぶには、メインスレッドが実際に`mainloop()`でTclのイベントループを処理している必要があり、メインスレッドが素の`Thread.join()`でブロックしている間はworker側の`after()`呼び出しがメインスレッドの応答を待って停止する（実測: `join(timeout=2)`のケースで、workerの`after()`呼び出しがまさに2秒間ブロックし、joinがタイムアウトして初めて解放された）。この状態が続くと`_on_close()`が無意味に最大タイムアウト分(11秒)ブロックし、その後`self.destroy()`で対象のTclインタプリタが破棄されるとworker側のブロックが恒久的に解消しない可能性があった。
+   - **最終対応**: `_on_close()`のworker待機を、単純な`join()`ではなく`self.update()`を挟みながらポーリングするループ（`while thread.is_alive() and time.monotonic() < deadline: self.update(); time.sleep(0.01)`）に変更した。`self.update()`がTclのイベントループを処理することでworker側の`after()`呼び出しが解放され、正しく完了する。実機検証で、この修正により`_on_close()`が実際のworker処理時間（例: 0.2秒程度のダミー再生)とほぼ同じ時間で返ることを確認した(修正前の単純joinでは最大タイムアウトの11秒までブロックしていた)。
+   - **テスト設計上の教訓**: 上記と同じ理由で、`tests/test_app_gui.py`のテストコード自体も`app.mainloop()`を実際に走らせる必要がある(単に`app.update()`をポーリングするだけのテストでは、workerスレッド側の最初の`self.after(0, ...)`呼び出し自体が`RuntimeError: main thread is not in main loop`になる)。最終的に、`app.mainloop()`をテストのメインスレッドで実際に走らせ、workerの完了を監視する別スレッド(watcher)が`app.after(0, app.quit)`でmainloopを止める構成にした(安全弁として`app.after(タイムアウトms, app.quit)`も設定)。`tests/test_app_gui.py::TestTestButtonThreadSafety`の2ケース(通常完了、テストボタン直後にウィンドウを閉じるケース)で確認した。
+4. **advanced_overridesのバリデーションがall-or-nothing（Low, CONFIRMED）**: `config.py`の`AppConfig.load()`で、`advanced_overrides`のみ`_FIELD_VALIDATORS`の対象外とし、`_sanitize_advanced_overrides()`でキー単位に検証するよう再設計した。1項目でも不正なら辞書全体を破棄していた挙動を、不正なキーだけを取り除き正当な値は保持する挙動に変更した。`tests/test_config.py::TestAdvancedOverridesPartialValidity`で、1件の不正値が他の正当な設定を巻き込んで破棄しないこと、複数の不正値・正常値が混在する場合も個別に判定されることを確認した。
+5. **極端値への安全性がTkinterのclamp挙動という暗黙の実装詳細にのみ依存（Low, CONFIRMED）**: `app.py`に`_ADVANCED_SLIDER_RANGES`(`ADVANCED_SLIDER_SPECS`のmin/maxから構築)と`_clamp()`ヘルパーを追加し、`_apply_advanced_overrides()`でconfig由来の値を`tk.Scale.set()`へ渡す前に明示的にクランプするようにした。`tests/test_app_gui.py::TestExtremeAdvancedOverrideValuesAreClamped`で、`1e9`・`-1e9`・`1e12`等の極端な値を注入してもスライダー値・`VoiceChain`側の実パラメータ(`chain.agc.target_linear`等)が仕様範囲内かつ有限であることを直接検証した。
+
+### 理由
+- いずれもAGENTS.md「バグは根本原因を直す」に従い、信頼境界（config.json、PortAudioのネイティブAPI境界、Tkinterのスレッド境界）での検証・後始末の欠落という構造的原因を直した。
+- 指摘3の対応過程で発覚した「単純な`Thread.join()`はTkinterのバックグラウンドスレッド`after()`呼び出しと相互にブロックし得る」という事実は、Reviewer指摘自体が言及していなかった追加のリスクだったが、実装時の実機検証(xvfb)で発見したため、症状を隠す表面的な修正（例えばjoinのタイムアウトを単に伸ばす等）ではなく、根本原因（Tclのメインループ要求とブロッキング待機の非両立）に対処する形にした。
+
+### 影響
+- `pytest tests/`（このLinux環境）: **81 passed, 0 failed**(D-005時点の66件 + 今回の新規15件。内訳: `test_config.py` 17→25件(+8、指摘1・4対応)、`test_engine.py` 5→8件(+3、指摘2対応)、`test_app_gui.py` 7→11件(+4、指摘3・5対応))。`tests/bench_chain.py`・`tests/soak_chain.py`は引き続き個別実行(このLinux環境で両方とも再実行し、リグレッションがないことを確認: `bench_chain`平均約0.7ms/フレーム、`soak_chain`はRSS成長率・処理時間比率とも安定した範囲内)。
+- `pyflakes soloclarity tests`: 警告0件。
+- `app/soloclarity/config.py`・`app/soloclarity/audio/engine.py`・`app/soloclarity/gui/app.py`を変更。DSPロジック本体(`app/soloclarity/dsp/`配下)には一切手を入れていない。
+- 今後、`self.after(0, ...)`をバックグラウンドスレッドから呼ぶコードを追加する場合、そのスレッドの完了を待つ側(メインスレッド)は単純な`Thread.join()`ではなく、`self.update()`を挟むポーリングパターンを使うこと(本エントリの指摘3対応・`_on_close()`実装を参照)。同様に、この種のスレッド間協調をxvfb環境でテストする場合は、`app.mainloop()`を実際に走らせるテスト構成(`tests/test_app_gui.py::TestTestButtonThreadSafety`参照)が必要であり、`app.update()`のポーリングだけでは代替できない。

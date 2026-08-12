@@ -19,6 +19,31 @@
 
 ---
 
+## 2026-08-12 T-003 Reviewer差し戻し対応(修正ループ、D-005への5件の指摘すべて解消)
+
+### 実施内容
+- D-005実装(コミット913189c)に対する別セッションReviewerの敵対的検証で、High×2・Medium×1・Low×2(すべてCONFIRMED)の指摘を受け、Managerの指示に従いすべて対応した(詳細はdocs/decisions.md D-006参照)。
+  1. (High) `config.py`の`advanced_overrides`検証にNaN/Infinity/-Infinityへの`math.isfinite()`チェックを追加。`AppConfig.save()`にも`json.dump(..., allow_nan=False)`を追加し、読み込み・書き込み両方の信頼境界で有限性を防御。
+  2. (High) `AudioEngine.start()`で`sd.Stream(...)`成功後の`.start()`失敗時に、開いたストリームを`close()`してから例外を再送出するよう修正(修正前はストリームハンドルがリークしていた)。
+  3. (Medium) `_on_test_clicked`のworker thread内Tkinter操作を`self.after(0, ...)`経由に統一。`_on_close()`でworker threadの完了を待ってから`chain.close()`するよう変更。
+  4. (Low) `advanced_overrides`のバリデーションをall-or-nothingからキー単位のフィルタリング(`_sanitize_advanced_overrides`)に変更。
+  5. (Low) `ADVANCED_SLIDER_SPECS`のmin/maxを使った明示的なクランプ(`_clamp`)を`_apply_advanced_overrides`に追加し、Tkinterの暗黙のクランプ挙動への依存を解消。
+- 指摘3の実装中、xvfb実機検証で追加の重要な問題を発見した: `_on_close()`を単純な`self._test_thread.join(timeout=...)`で実装したところ、Tkinterの`self.after(0, ...)`をバックグラウンドスレッドから呼ぶにはメインスレッドが実際に`mainloop()`でTclのイベントループを処理している必要があり、単純な`join()`でメインスレッドがブロックしている間はworker側の`after()`呼び出しが解放されず、最大タイムアウト(11秒)まで無意味にブロックすることを実測で確認した。`self.update()`を挟みながらポーリングするループへ修正し、実際のworker処理時間相当(実測0.22秒)で`_on_close()`が返ることを確認した。
+- 上記の発見に伴い、`tests/test_app_gui.py`のスレッド関連テストも、単なる`app.update()`ポーリングでは`RuntimeError: main thread is not in main loop`になることが判明したため、`app.mainloop()`を実際に走らせ、workerの完了を監視する別スレッド(watcher)が`app.after(0, app.quit)`でmainloopを止める構成に書き直した(安全弁のタイムアウトも設定)。このテスト設計変更は、セッション中断を挟んでManagerから再指示を受けて完了させた。
+
+### 結果(実際に実行したテストの数値のみ記録)
+- `pytest tests/`(このLinux環境): **81 passed, 0 failed**(D-005時点の66件から新規15件追加。内訳: `test_config.py` 17→25件、`test_engine.py` 5→8件、`test_app_gui.py` 7→11件)。
+- `pyflakes soloclarity tests`: 警告0件。
+- `python -m tests.bench_chain`(再測定、DSPロジックは今回無変更): 1passed、リグレッションなし。
+- `python -m tests.soak_chain`(再測定、10万フレーム): 1 passed(95.13秒)、リグレッションなし。DSPロジック本体は今回のReviewer対応で一切変更していない(`config.py`/`engine.py`/`gui/app.py`のみ変更)。
+- 新規テストの主な内容: NaN/Infinity/-Infinityそれぞれの読み込み側フォールバックとsave側ValueError(`TestAdvancedOverridesRejectNonFiniteValues`)、advanced_overridesのキー単位フィルタリング(`TestAdvancedOverridesPartialValidity`)、Pa_StartStream失敗時のストリームclose(単発・50回連続、`TestStartClosesStreamOnPaStartStreamFailure`)、極端値のクランプ(`TestExtremeAdvancedOverrideValuesAreClamped`)、テストボタンworker threadの`self.after()`経由での状態更新とウィンドウクローズ時の競合回避(`TestTestButtonThreadSafety`、実際に`app.mainloop()`を走らせる構成で検証)。
+
+### 次回開始位置
+- ReviewerによるT-003の再レビュー(敵対的検証、REVIEW.md準拠)。承認後、Manager判断でT-003を完了とする。
+- Windows実機での最終確認は引き続きユーザー側の作業として残っている(`app/WINDOWS_VERIFICATION_CHECKLIST.md`、全項目未実施)。
+
+---
+
 ## 2026-08-12 T-003 最終総点検・完成化(敵対的検証による堅牢化)
 
 ### 実施内容
