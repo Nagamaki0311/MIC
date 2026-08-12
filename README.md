@@ -1,25 +1,18 @@
-# project001
+# MIC
 
-Claude CodeによるAI開発OS。新規アプリ開発に共通する開発方針・タスク管理・レビュー手順をテンプレートとして提供する。
+HyperX SoloCastを入力デバイスとする軽量ボイスプロセッサ。低い声・小さい声でもDiscord通話相手に聞き取りやすくすることに特化し、ノイズ抑制・EQ・コンプレッサー等の処理を行った音声を仮想マイク経由でDiscordへ渡す。
+
+開発方針・タスク管理・レビュー手順は[project001](https://github.com/nagamaki0311/project001)テンプレート（AGENTS.md / REVIEW.md / CLAUDE.md）を踏襲する。
 
 ## セットアップ
 
 1. `git clone`等でこのリポジトリを取得する。
-2. （任意）`bash .claude/bootstrap.sh`を実行し、Optional Dependency（Agent-Reach/Code Review Graph/Context7/GitHub CLI等）の導入状況を確認する。インストールは行わず案内のみを表示するため、実行しなくてもproject001は完全に動作する。
+2. （任意）`bash .claude/bootstrap.sh`を実行し、Optional Dependency（Agent-Reach/Code Review Graph/Context7/GitHub CLI等）の導入状況を確認する。インストールは行わず案内のみを表示するため、実行しなくても本リポジトリの開発フローは完全に動作する。
 3. AGENTS.mdの開発フロー（User → Manager → Planner → Developer → Reviewer → Manager → Complete）に従って進める。
 
 ## 使い方
 
-新規アプリを開発する場合、このリポジトリをコピーして雛形として使う。個別アプリの仕様・実装コードはproject001自体には追加しない。以降はAGENTS.mdの開発フローに従って進める。
-
-### 新規プロジェクトでの初期化
-
-`/init-project`コマンド（`.claude/commands/init-project.md`）を実行するか、以下の手順を直接行う。コピー直後にこの手順を行わないと、新規プロジェクトのSessionStart Hookがproject001自身の構築履歴を表示し続けてしまう。docs/のうちtasks.md/progress.md/decisions.mdの3つのみをリセットする。
-
-- `docs/tasks.md`: 「## タスク一覧」表のヘッダ行と区切り行は残し、`T-xxx`の行をすべて削除する。「## バックログ」の既存項目もすべて削除する。列構成は変えない（SessionStart Hookが状態列の値でフィルタするため）。
-- `docs/progress.md`: 「## 記録フォーマット」直後の`---`（この行を含む）より下をすべて削除する。
-- `docs/decisions.md`: 同様に`---`（この行を含む）より下のD-xxxをすべて削除する。
-- `README.md`: プロジェクト名・概要を書き換える。本節「### 新規プロジェクトでの初期化」自体は削除してよい。
+アプリ本体の使い方（動作環境・インストール手順・操作方法）は、実装が固まった時点で本節に追記する。現時点ではdocs/tasks.mdの進行中タスクを参照。
 
 ## 構成
 
