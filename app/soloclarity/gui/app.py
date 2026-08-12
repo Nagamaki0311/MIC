@@ -304,11 +304,14 @@ class App(tk.Tk):
             if key in self._advanced_sliders:
                 self._advanced_sliders[key].set(value)
         if overrides:
-            self._on_advanced_slider_changed(None)
+            self._apply_slider_values_to_chain()
 
     def _on_advanced_slider_changed(self, _changed_key: Optional[str]) -> None:
         if self._updating_from_code:
             return
+        self._apply_slider_values_to_chain()
+
+    def _apply_slider_values_to_chain(self) -> None:
         s = {key: scale.get() for key, scale in self._advanced_sliders.items()}
         clarity_stage = presets.ClarityStage(
             highpass_hz=s["clarity_highpass_hz"],
