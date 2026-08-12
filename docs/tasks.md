@@ -15,7 +15,7 @@
 
 | ID | タスク | 優先度 | 状態 | 担当エージェント | 備考 |
 |----|--------|--------|------|------------------|------|
-| T-001 | HyperX SoloCast向け軽量ボイスプロセッサの開発 | 高 | 計画中 | claude | Manager調査によりアーキテクチャを決定（D-001参照）。実装はdeveloperへ委任予定 |
+| T-001 | HyperX SoloCast向け軽量ボイスプロセッサの開発 | 高 | レビュー中 | claude | 実装完了（app/以下、D-001/D-002参照）。自動テスト26件pass・ベンチマーク実施済み。Windows実機での動作確認は未実施（WINDOWS_VERIFICATION_CHECKLIST.md）。詳細はdocs/progress.md参照 |
 
 ## バックログ（未着手・優先度未確定）
 
