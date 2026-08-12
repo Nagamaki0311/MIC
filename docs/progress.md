@@ -40,6 +40,24 @@
 
 ### 次回開始位置
 - ReviewerによるT-003の再レビュー(敵対的検証、REVIEW.md準拠)。承認後、Manager判断でT-003を完了とする。
+
+---
+
+## 2026-08-12 T-003 Reviewer再差し戻し対応(`_on_close()`再入によるTclError, Medium, CONFIRMED)
+
+### 実施内容
+- D-006の修正(コミットedd73b2)をReviewerが再検証し、指摘1・2・4・5は解消をCONFIRMEDしたが、指摘3の対応そのもの(`_on_close()`の`self.update()`ポーリング待機)が新たな問題を持ち込んでいることを発見した(詳細はdocs/decisions.md D-007参照)。
+- `_on_close()`はworker thread完了待ちの間、最大11秒`self.update()`をポーリングし続けるが、この待機ループ中はTclのイベントループが回っているため、ユーザーが再度閉じる操作をすると`_on_close()`が再入され得る。Reviewerが`app.after()`で`_on_close`を2回ディスパッチする形で実際に再現し、内側の呼び出しが先に`self.destroy()`まで完了した後、外側の呼び出しが自分の`self.destroy()`に到達した時点で`TclError: application has been destroyed`が発生することを確認していた。
+- `App.__init__`に`self._closing = False`を追加し、`_on_close()`冒頭に`if self._closing: return`という多重実行防止フラグを追加した。
+- `tests/test_app_gui.py::TestTestButtonThreadSafety::test_reentrant_close_while_waiting_for_worker_does_not_raise`を追加し、Reviewerの再現方法(`app.after()`での2回ディスパッチ)を踏襲して検証した。ガードを一時的に取り除いた状態でこのテストを実行し、実際に同じ`TclError`でテストが失敗することを確認した上で、ガードを戻すとpassすることを確認した(テスト自体が指摘内容を正しく検出できることの二重チェック)。
+
+### 結果(実際に実行したテストの数値のみ記録)
+- `pytest tests/`(このLinux環境): **82 passed, 0 failed**(D-006時点の81件から新規1件追加)。`tests/test_app_gui.py`単体を5回連続実行してもフレーキーな失敗なし。
+- `pyflakes soloclarity tests`: 警告0件。
+- 変更は`app/soloclarity/gui/app.py`のみ(`App.__init__`への1行追加、`_on_close()`冒頭への6行のガード追加)。DSPロジック・config.py・engine.pyは無変更。
+
+### 次回開始位置
+- ReviewerによるT-003の再レビュー(敵対的検証、REVIEW.md準拠)。承認後、Manager判断でT-003を完了とする。
 - Windows実機での最終確認は引き続きユーザー側の作業として残っている(`app/WINDOWS_VERIFICATION_CHECKLIST.md`、全項目未実施)。
 
 ---

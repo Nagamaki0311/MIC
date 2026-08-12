@@ -263,3 +263,54 @@ class TestTestButtonThreadSafety:
 
         assert errors == []
         assert play_finished.is_set()  # closeがworkerの完了を待ったことの確認
+
+    def test_reentrant_close_while_waiting_for_worker_does_not_raise(
+        self, app_factory, monkeypatch
+    ):
+        """`_on_close`が待機ループ(self.update()ポーリング)中に再入されても
+        `TclError: application has been destroyed`を起こさない(Reviewer再指摘、
+        実機再現済み: `_on_close`実行中はself.update()でTclのイベントループが
+        回っているため、ユーザーが再度閉じる操作をすると`_on_close`が再入され得る。
+        内側の呼び出しが先にdestroy()し、外側の呼び出しが自分のdestroy()に到達した
+        時点でTclErrorになっていた)。
+
+        Reviewerの再現方法(app.after()で_on_closeを2回ディスパッチする)を踏襲する。
+        """
+        monkeypatch.setattr(
+            app_mod,
+            "record_and_process_preview",
+            lambda chain, device, duration: np.zeros(10, dtype=np.float32),
+        )
+
+        def slow_play_preview(audio, device):
+            import time
+
+            time.sleep(0.3)
+
+        monkeypatch.setattr(app_mod, "play_preview", slow_play_preview)
+
+        app = app_factory()
+        errors: list[BaseException] = []
+        close_call_count = {"n": 0}
+
+        def safe_close():
+            close_call_count["n"] += 1
+            try:
+                app._on_close()
+            except BaseException as exc:  # noqa: BLE001 - テストで検出するため広く捕捉
+                errors.append(exc)
+
+        def start_and_schedule_double_close():
+            app._on_test_clicked()
+            # workerがまだ実行中(slow_play_previewの0.3秒待ち)の間に_on_close()を
+            # 2回ディスパッチする。1回目の待機ループ(self.update()ポーリング)中に
+            # 2回目がTclのイベントループ経由で再入されるケースを狙う。
+            app.after(0, safe_close)
+            app.after(20, safe_close)
+
+        app.after(0, start_and_schedule_double_close)
+        app.after(self.SAFETY_TIMEOUT_MS, lambda: app.quit() if app.winfo_exists() else None)
+        app.mainloop()
+
+        assert close_call_count["n"] == 2  # 2回とも呼ばれた(2回目は即returnする)こと
+        assert errors == []  # 再入によるTclErrorが発生しないこと

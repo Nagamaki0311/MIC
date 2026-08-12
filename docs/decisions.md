@@ -220,3 +220,29 @@
 - `pyflakes soloclarity tests`: 警告0件。
 - `app/soloclarity/config.py`・`app/soloclarity/audio/engine.py`・`app/soloclarity/gui/app.py`を変更。DSPロジック本体(`app/soloclarity/dsp/`配下)には一切手を入れていない。
 - 今後、`self.after(0, ...)`をバックグラウンドスレッドから呼ぶコードを追加する場合、そのスレッドの完了を待つ側(メインスレッド)は単純な`Thread.join()`ではなく、`self.update()`を挟むポーリングパターンを使うこと(本エントリの指摘3対応・`_on_close()`実装を参照)。同様に、この種のスレッド間協調をxvfb環境でテストする場合は、`app.mainloop()`を実際に走らせるテスト構成(`tests/test_app_gui.py::TestTestButtonThreadSafety`参照)が必要であり、`app.update()`のポーリングだけでは代替できない。
+
+---
+
+## D-007: T-003 Reviewer再指摘対応（`_on_close()`の再入によるTclError, Medium, CONFIRMED）
+
+- 日付: 2026-08-12
+- 状態: 採用
+
+### 背景
+- D-006の修正（コミットedd73b2）をReviewerが再検証し、指摘1・2・4・5は解消をCONFIRMEDした。一方、指摘3の対応そのもの（`_on_close()`を`self.update()`ポーリング待機に変更したこと）が新たな問題を持ち込んでいることが判明した。
+- `_on_close()`はworker thread完了待ちの間、最大`TEST_THREAD_JOIN_TIMEOUT_SECONDS`(11秒)`self.update()`をポーリングし続けるが、この待機ループ中はTclのイベントループが実際に回っている。そのため、ユーザーが待機中にもう一度閉じる操作(ウィンドウのXボタン等)をすると`_on_close()`が再入(nested)呼び出しされ得る。Reviewerは`app.after()`で`_on_close`を2回ディスパッチする形で実際に再現し、内側の呼び出しが先に`self.destroy()`まで完了した後、外側の呼び出しが自分の`self.destroy()`に到達した時点で`_tkinter.TclError: can't invoke "destroy" command: application has been destroyed`が発生することを確認した(mainloop()自体はクラッシュせず正常終了し、`_stop_engine()`/`chain.close()`は多重呼び出しに対して既に安全だったため実害は限定的だが、未処理例外のログが出る)。
+
+### 決定
+- `App.__init__`に`self._closing = False`を追加し、`_on_close()`冒頭で`if self._closing: return`(多重実行防止フラグ)を追加した。フラグを立てた後に`_save_config()`・worker待機ループ・`_stop_engine()`・`chain.close()`・`self.destroy()`を実行する構成にすることで、待機ループの`self.update()`経由で`_on_close()`が再入されても、2回目以降の呼び出しは即座にreturnし、`self.destroy()`が二重に呼ばれることがなくなる。
+- `tests/test_app_gui.py::TestTestButtonThreadSafety::test_reentrant_close_while_waiting_for_worker_does_not_raise`を追加した。Reviewerの再現方法(`app.after()`で`_on_close`を2回ディスパッチする)を踏襲し、`app.mainloop()`を実際に走らせながらworker実行中(0.3秒のダミー再生)に`_on_close()`を`app.after(0, ...)`と`app.after(20, ...)`の2回スケジュールし、いずれの呼び出しも例外を出さないことを確認する。
+- **検証**: このテストが実際に指摘内容を再現・検出できることを、ガード(`if self._closing: return`)を一時的に取り除いたコードに対して同テストを実行することで確認した。ガード無しでは`errors == [TclError('can\'t invoke "destroy" command: application has been destroyed')]`となりテストが失敗し、ガードを戻すとpassすることを確認した(テストの実効性そのものを検証する二重チェック)。
+
+### 理由
+- AGENTS.md「バグは根本原因を直す」に従い、`_on_close()`という単一のエントリポイントに再入防止フラグを置くことで、Xボタン連打・ウィンドウマネージャからの複数回のクローズイベント等、どの経路から再度`_on_close()`が呼ばれても一箇所で確実に防げるようにした(個々の呼び出し元にガードを分散させない)。
+- D-006の対応(`self.update()`ポーリング)自体は、Tkinterのバックグラウンドスレッド`after()`呼び出しの要求(メインスレッドが実際にイベントループを処理していること)を満たすために必要な変更であり、撤回はしない。今回はその変更が新たに開けた「待機ループ中はイベントループが回っている」という窓に対して、再入防止フラグで閉じる形にした。
+
+### 影響
+- `pytest tests/`(このLinux環境): **82 passed, 0 failed**(D-006時点の81件 + 今回の新規1件、`tests/test_app_gui.py`)。5回連続実行してもフレーキーな失敗なし。
+- `pyflakes soloclarity tests`: 警告0件。
+- `app/soloclarity/gui/app.py`のみ変更(`App.__init__`への1行追加、`_on_close()`冒頭への6行のガード追加)。DSPロジック・config.py・engine.pyには手を入れていない。
+- 今後、`_on_close()`のように「待機中に`self.update()`等でイベントループを回す」実装を追加する場合、同じエントリポイントが待機中に再入され得ることを前提に、多重実行防止フラグを併せて検討すること。

@@ -17,7 +17,7 @@
 |----|--------|--------|------|------------------|------|
 | T-001 | HyperX SoloCast向け軽量ボイスプロセッサの開発 | 高 | 完了 | claude | Reviewer再検証で修正2件（High/Low）とも解消(CONFIRMED)、回帰なし、自動テスト26件pass。Windows実機・Discordでの動作確認はこのLinux環境では実施不可能なため未実施、WINDOWS_VERIFICATION_CHECKLIST.mdに沿ったユーザー側での最終確認が別途必要（D-001〜D-003参照） |
 | T-002 | GitHub Actionsによるexeビルドの自動化 | 中 | 完了 | claude | このLinux環境ではWindows向けexeをビルドできないため、windows-latestランナー上でpytest実行→PyInstallerビルド→Artifact公開を行うワークフローを追加（D-004参照） |
-| T-003 | 最終総点検・完成化（性能・音質・機能・UI/UX・安定性・敵対的検証） | 高 | レビュー中 | claude | Reviewer差し戻し（High×2/Medium×1/Low×2、すべてCONFIRMED）に対応完了、再レビュー待ち。NaN/Infinity混入によるconfig破損対策、AudioEngine.start()のストリームリーク修正、テストボタンworker threadのスレッド安全性(self.after()統一+_on_close()でのworker完了待ち)、advanced_overridesのキー単位バリデーション、極端値の明示的クランプを実施。pytest 81 passed、pyflakes警告0件。詳細はdocs/decisions.md D-006・docs/progress.md参照 |
+| T-003 | 最終総点検・完成化（性能・音質・機能・UI/UX・安定性・敵対的検証） | 高 | レビュー中 | claude | Reviewer差し戻し2巡目（D-006: High×2/Medium×1/Low×2は解消CONFIRMED → D-007: `_on_close()`再入によるTclError、Medium、CONFIRMED）に対応完了、再レビュー待ち。`App.__init__`に多重実行防止フラグ`_closing`を追加し`_on_close()`冒頭でガード。pytest 82 passed、pyflakes警告0件。詳細はdocs/decisions.md D-006・D-007・docs/progress.md参照 |
 
 ## バックログ（未着手・優先度未確定）
 

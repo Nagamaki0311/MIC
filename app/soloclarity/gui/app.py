@@ -74,6 +74,7 @@ class App(tk.Tk):
             raise RuntimeError(f"音声処理エンジンの初期化に失敗しました: {exc}") from exc
         self.engine: Optional[AudioEngine] = None
         self._test_thread: Optional[threading.Thread] = None
+        self._closing = False
 
         self._input_devices = device_lib.list_input_devices()
         self._output_devices = device_lib.list_output_devices()
@@ -467,6 +468,16 @@ class App(tk.Tk):
         )
 
     def _on_close(self) -> None:
+        if self._closing:
+            # `_test_thread`の完了待ちループ中(最大TEST_THREAD_JOIN_TIMEOUT_SECONDS)は
+            # self.update()でTclのイベントループが回っているため、ユーザーが再度
+            # 閉じる操作(ウィンドウのXボタン等)をすると`_on_close`が再入され得る。
+            # 内側の呼び出しが先にself.destroy()まで完了すると、外側の呼び出しが
+            # 自分のself.destroy()に到達した時点で
+            # `TclError: application has been destroyed`になる(Reviewer指摘、実機再現済み)。
+            # 多重実行防止フラグで即座に無視する。
+            return
+        self._closing = True
         self._save_config()
         if self._test_thread is not None and self._test_thread.is_alive():
             # テスト再生のworker threadが`self.chain`を使用中に`chain.close()`と
