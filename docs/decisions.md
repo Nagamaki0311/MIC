@@ -301,3 +301,10 @@
 - `app/soloclarity/audio/engine.py`の実装が変更される。既存の`tests/test_engine.py`(単一`sd.Stream`のフェイクを前提にしたテスト)は新しいアーキテクチャに合わせて書き直しが必要。
 - このLinux環境では実デバイスでの動作確認はできないため、新しいリングバッファのロジック(順序保持、満杯時の破棄、空時の無音出力)は合成コールバック呼び出しによるユニットテストで検証する。実際にWindows実機でSoloCast→CABLE Inputの組み合わせが起動できるかは、ユーザーによる再検証が必要。
 - 本Issueは実機フィードバックによって発見された初めての具体的な不具合であり、Windows実機検証の重要性を裏付けている。今後同種の「異なる入出力デバイスの組み合わせ」に起因する問題がないか、`app/WINDOWS_VERIFICATION_CHECKLIST.md`に確認項目として明記する。
+
+### 追記（2026-08-12・実装時に確定した詳細）
+
+- **ジッタバッファサイズ**: `app/soloclarity/audio/engine.py`の`JITTER_BUFFER_FRAMES = 4`(1フレーム=10ms・48kHz・480サンプルのため40ms相当)。決定時に挙げた目安(2〜6フレーム=20〜60ms)の中間値を採用した。バッファ実装は`collections.deque(maxlen=JITTER_BUFFER_FRAMES)`を薄くラップした内部クラス`_FrameRingBuffer`(同ファイル内、新規ファイルは作らない)。`push()`は`deque`の`maxlen`超過時の自動先頭破棄をそのまま利用し、`pop()`は空なら`None`を返す。両方とも`threading.Lock`で保護しているが、クリティカルセクションは`append`/`popleft`のO(1)操作のみであり、PortAudioコールバック内でのブロッキング待機(バッファの空き/データ待ち)は一切行わない。
+- **メーター計測タイミング**: 入力メーター(`in_rms`/`in_peak`)は入力側コールバック(`_input_callback`)で処理直後に測定し、出力メーター(`out_rms`/`out_peak`)は出力側コールバック(`_output_callback`)で実際に書き出す値(アンダーラン時の無音を含む)を測定する設計にした。入力側で両方を測ると、ジッタバッファの空(アンダーラン)でフレームが実際には出力されなかった場合でも「処理はできていた」ことになり、Discord側へ実際に届く音量と表示上のメーターが乖離するため、出力側の実測値を使う方を選んだ。入力メーターの値は`self._last_input_levels`(タプル)経由で出力側コールバックへ橋渡ししている(タプルの再代入はCPythonでは単一のSTORE_ATTR/LOAD_ATTRで完結し部分更新を観測しないため、追加のロックは設けていない)。`tests/test_engine.py::TestMeterMeasuresActualOutput`で、アンダーラン発生時に出力メーターがfloor_db(無音)を反映し、直前の入力レベルへ引きずられないことを確認した。
+- **`start()`の順序**: 入力(`sd.InputStream`)を先に開いてから出力(`sd.OutputStream`)を開く順序にした。出力側の開始が失敗した場合は、開始済みの入力側を`stop()`→`close()`してから例外を再送出する。入力側の開始自体が失敗した場合は、出力側は一切生成されない(`_open_and_start`が入力側の失敗時点で例外を再送出するため)。`tests/test_engine.py::TestStartOpensBothStreamsAndCleansUpOnFailure`の3ケース(両方成功/入力失敗/出力失敗)で、開いた方だけが正しくclose/stopされ、失敗するたびに参照が蓄積しないこと(50回連続失敗のケース)を確認した。
+- **`stop()`**: 入力・出力それぞれ独立した`if`ブロックでstop/close/Noneクリアを行う(D-006の単一ストリーム版と同じ「片方の失敗が他方の後始末をスキップさせない」構造を踏襲)。`tests/test_engine.py::TestStop`で両ストリームが確実にstop/closeされることを確認した。

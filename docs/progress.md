@@ -19,6 +19,27 @@
 
 ---
 
+## 2026-08-12 T-004 実装完了(AudioEngineをInputStream/OutputStream+リングバッファへ書き直し)
+
+### 実施内容
+- D-009の決定に従い、`app/soloclarity/audio/engine.py`の`AudioEngine`を、単一の双方向`sd.Stream`から、独立した`sd.InputStream`(SoloCast側)と`sd.OutputStream`(CABLE Input側)を有界リングバッファ(ジッタバッファ、`_FrameRingBuffer`、`collections.deque(maxlen=4)`)で橋渡しする構成へ書き直した。
+  - `_input_callback`: フレーム読み取り→入力メーター更新→`chain.process()`(例外時はbypass+`on_error`、既存契約を維持)→リングバッファへ非ブロッキングpush(満杯時は最古を自動破棄)。
+  - `_output_callback`: リングバッファから非ブロッキングpop、空ならゼロ埋めの無音を出力。出力メーターは実際に書き出す値(アンダーラン時の無音を含む)を測定する設計にした(理由はD-009追記参照)。
+  - `start()`: 入力ストリームを先に開始し、出力ストリームの開始に失敗した場合は入力側をstop/closeしてから例外を再送出(D-006のリーク防止パターンを2ストリームへ拡張)。入力側自体の開始が失敗した場合は出力側を一切生成しない。
+  - `stop()`: 入力・出力を独立したブロックでstop/close/参照クリアする。`is_running()`は両方の参照が非Noneであることを条件にした(意味は維持)。
+  - `record_and_process_preview`/`play_preview`(テスト再生ボタン用)は変更対象外のため無変更。GUI(`app.py`)側のAudioEngine呼び出しインターフェース(コンストラクタ引数、`bypass`/`start()`/`stop()`/`is_running()`)も無変更。
+- `app/tests/test_engine.py`を新アーキテクチャに合わせて全面的に書き直した。既存の例外保護(bypass+on_error)テストを`_input_callback`/`_output_callback`の組み合わせへ移植した上で、リングバッファの順序保持・満杯時の破棄・空時の無音出力、出力側メーターがアンダーラン時に入力レベルへ引きずられないこと、`start()`の3パターン(両成功/入力失敗/出力失敗)でのリーク防止・後始末、`stop()`の両ストリーム後始末を新規に追加した。
+
+### 結果
+- このLinux環境: `pytest tests/` **89 passed**(D-007時点の82件 + 今回のtest_engine.py書き直しによる純増7件)。`pyflakes soloclarity tests` 警告0件。
+- 実オーディオデバイス・Windows実機での動作確認はこの環境では実施不可能(D-001の既知の制約)。「動作確認した」とは主張せず、上記の自動テスト結果のみを記録する。SoloCast→CABLE Inputの組み合わせで実際にストリームが開けるかは、ユーザーによるWindows実機での再検証が必要。
+- `docs/decisions.md` D-009に、ジッタバッファサイズ(4フレーム=40ms)・メーター計測タイミング(出力側で実測)・`start()`/`stop()`の実装詳細を追記した。
+
+### 次回開始位置
+- Reviewerによる敵対的検証を受ける(T-004を「レビュー中」に更新済み)。承認後、コミット・GitHub Actions(windows-latest)でのビルド確認、ユーザーへ新しいexeでの実機再検証を依頼する。
+
+---
+
 ## 2026-08-12 T-003 完了(version 1.0.0確定・最終ビルド)
 
 ### 実施内容

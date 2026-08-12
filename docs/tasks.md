@@ -18,7 +18,7 @@
 | T-001 | HyperX SoloCast向け軽量ボイスプロセッサの開発 | 高 | 完了 | claude | Reviewer再検証で修正2件（High/Low）とも解消(CONFIRMED)、回帰なし、自動テスト26件pass。Windows実機・Discordでの動作確認はこのLinux環境では実施不可能なため未実施、WINDOWS_VERIFICATION_CHECKLIST.mdに沿ったユーザー側での最終確認が別途必要（D-001〜D-003参照） |
 | T-002 | GitHub Actionsによるexeビルドの自動化 | 中 | 完了 | claude | このLinux環境ではWindows向けexeをビルドできないため、windows-latestランナー上でpytest実行→PyInstallerビルド→Artifact公開を行うワークフローを追加（D-004参照） |
 | T-003 | 最終総点検・完成化（性能・音質・機能・UI/UX・安定性・敵対的検証） | 高 | 完了 | claude | Reviewerによる3巡の敵対的検証（D-005実装→High×2/Medium×1/Low×2発見→D-006対応→再検証で新規Medium1件発見→D-007対応→最終再検証）を経て、合計6件すべて解消(CONFIRMED)。Reviewer最終所見「このまま配布できる」。pytest 82 passed、pyflakes警告0件。version 1.0.0として確定・GitHub Actionsでビルド済み（D-008参照）。Windows実機・Discordでの最終確認はWINDOWS_VERIFICATION_CHECKLIST.mdに沿ってユーザー側で別途必要 |
-| T-004 | 実機報告: SoloCast→CABLE Input間のストリーム開始エラー(PaErrorCode -9993)の修正 | 高 | 実装中 | claude | ユーザーがWindows実機でv1.0.0を実行し、異なる入出力デバイスの組み合わせでストリームが開けない(paBadIODeviceCombination)ことを報告。AudioEngineが単一の双方向sd.Streamで異なるデバイスを結合しているのが原因と特定。InputStream/OutputStream分離+リングバッファ方式への変更をDeveloperへ委任。詳細はdocs/decisions.md D-009参照 |
+| T-004 | 実機報告: SoloCast→CABLE Input間のストリーム開始エラー(PaErrorCode -9993)の修正 | 高 | レビュー中 | claude | AudioEngineを単一sd.StreamからInputStream/OutputStream+リングバッファ(ジッタバッファ)構成へ書き直し完了。pytest 89 passed、pyflakes警告0件。GUI(app.py)側のインターフェースは無変更。実機動作確認は未実施(このLinux環境では不可能、D-001)。詳細はdocs/decisions.md D-009、docs/progress.md参照 |
 
 ## バックログ（未着手・優先度未確定）
 
