@@ -110,3 +110,37 @@
 - xvfb環境で`advanced_overrides`を含む`config.json`から`App`を復元し、`app.chain.agc.target_linear`が保存値(`agc_target_dbfs=-18.5`)から計算される期待値と一致することを実機検証した(プリセットデフォルトの`-17.0`とは異なる値であることを確認済み)。
 - `pytest tests/`は26 passedのまま(リグレッションなし)。
 - 今後、詳細設定パネルに新しいスライダーやconfig復元経路を追加する場合も、chainへの反映処理は`_apply_slider_values_to_chain()`に一本化し、`_updating_from_code`ガードを持つイベントハンドラ側からのみ条件付きで呼び出す構造を踏襲すること。
+
+---
+
+## D-004: GitHub Actions（windows-latest）によるexeビルドの自動化
+
+- 日付: 2026-08-12
+- 状態: 採用
+
+### 背景
+- ユーザーから「実行ファイルは出せるか」と問われた。D-001記載の制約どおり、この開発環境（Linuxのクラウドコンテナ、Wine等のWindows互換レイヤーも未導入であることを実機確認済み）ではPyInstallerがクロスコンパイルに対応していないため、`SoloClarity.exe`をこのセッション内で直接生成することはできない。
+- 一方、ユーザーの手元でのビルド（`app/build/build_windows.bat`、README.md記載）は既に用意済みだが、より手間なくexeを入手できる方法として、CI（GitHub Actions）で実際のWindowsランナー上でビルドし、Artifactとして配布する提案をユーザーが了承した。
+
+### 決定
+- `.github/workflows/build-windows.yml`を新規作成。`windows-latest`ランナー上で以下を実行する。
+  1. Python 3.11をセットアップ
+  2. `requirements-dev.txt`をインストールし、`pytest tests/`を実行（このステップにより、これまでLinux環境でしか検証できていなかったRNNoiseラッパー（Windows版`rnnoise.dll`経由）を含むDSPロジックが、実際のWindows上で初めて検証されることになる）
+  3. 既存の`app/build/build_windows.bat`をそのまま呼び出してビルド（ビルド手順を複製せず、既存スクリプトを単一の実装として再利用する）
+  4. `app/dist/SoloClarity.exe`を`actions/upload-artifact`でArtifactとして公開（保持期間30日）
+- トリガーは`push`(mainブランチ、`app/**`または本ワークフロー自体の変更時)、`pull_request`(同条件)、`workflow_dispatch`(手動実行)の3つ。PRトリガーにより、mainへマージする前にWindows上でのビルド・テストが継続的に検証されるようになる。
+
+### 理由（検討した代替案）
+- **Wine経由でこのLinux環境からビルドする案は不採用**: このセッションにWineが導入されておらず、導入して試みたとしても、実際のWindows実行環境との差異（DLL・オーディオドライバ周りの挙動）を検証しようがなく、成果物の信頼性を保証できない。判定ラダー（既存の成熟した手段を優先）に照らし、GitHub Actionsの`windows-latest`という公式にサポートされたWindows実行環境を使う方が確実と判断した。
+- **ビルド手順を`build_windows.bat`と別にワークフロー内へ再実装する案は不採用**: 同じ手順を2箇所に持つと、将来どちらか一方だけが更新されて食い違うリスクがある（AGENTS.mdの「同じ情報を複数箇所に保存しない」原則）。ワークフローから既存の`.bat`を呼び出す形にした。
+- **pull_requestトリガーを追加しない案（push/dispatchのみ）は不採用**: `app/`を変更するPRの時点でWindows上のビルド・テストが継続的に検証できることは、D-001に記載した「Windows実機での検証ができない」という制約を部分的に補う直接的な効果があり、コスト（Windowsランナーの実行時間）に対して価値が大きいと判断した。
+
+### 影響
+- 今後`app/`を変更してmainへpush、またはPRを作成すると、自動的にWindows上でのpytest実行とexeビルドが走る。ビルドが失敗すれば、Reviewerによるレビューだけでは検出できなかったWindows固有の問題（依存解決・DLL同梱漏れ等）が可視化される。
+- ユーザーは、GitHub ActionsのArtifactから`SoloClarity.exe`をダウンロードするだけで、自分でPythonやビルド手順を用意しなくてもexeを入手できるようになった。
+- Windowsランナーの実行時間はGitHub Actionsの無料枠を消費する（Linuxランナーよりも消費係数が大きい）。頻繁に`app/`を変更する場合はコストを意識する必要がある。
+
+### 追記（2026-08-12・初回CI実行での修正）
+- ワークフロー追加直後の初回CI実行（PR #3, run 31609477972）で、`pytest tests/`は26 passedだったが、`python -m PyInstaller`が`ERROR: Unable to find 'D:\a\MIC\MIC\app\build\output\soloclarity\dsp\vendor\rnnoise.dll' when adding binary and data files.`で失敗した。このLinux開発環境ではPyInstallerのビルドフェーズ自体を一度も実行・検証できていなかったため（D-001の既知の制約）、実際にWindows上で走らせて初めて顕在化した問題である。
+- 原因: `--add-binary`に渡した相対パス（`soloclarity\dsp\vendor\rnnoise.dll`）を、PyInstallerがカレントディレクトリ（`app`）ではなく`--specpath`（`build\output`）基準で解決していた。`--workpath`/`--specpath`をbuild_windows.bat自身の置き場所（`app\build`）から分離するために導入したこの2オプションが、意図しない形で相対パス解決の基準まで変えてしまっていた。
+- 対応: `build_windows.bat`で`set "RNNOISE_DLL=%CD%\soloclarity\dsp\vendor\rnnoise.dll"`により絶対パスへ展開し、`--add-binary`にはその絶対パスを渡すよう修正した。CI（`.github/workflows/build-windows.yml`）を追加した直接の効果として、この問題をmainへ混入させる前にPR上で検出できた。

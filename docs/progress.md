@@ -19,6 +19,28 @@
 
 ---
 
+## 2026-08-12 T-002 GitHub Actionsによるexeビルドの自動化
+
+### 実施内容
+- ユーザーから「実行ファイルは出せるか」との質問に対し、この開発環境（Linux、Wine等も未導入）ではPyInstallerのクロスコンパイル不可により直接exeを渡せない旨を説明し、代替案としてGitHub Actionsでのビルド提案を提示、了承を得た。
+- `.github/workflows/build-windows.yml`を新規作成（D-004参照）。`windows-latest`ランナーでpytest実行→既存の`app/build/build_windows.bat`によるビルド→`app/dist/SoloClarity.exe`をArtifact公開する構成。トリガーはpush(main, app/**)・pull_request(同条件)・workflow_dispatch。
+- `docs/tasks.md`にT-002を追加（状態=完了、ワークフロー追加自体は完了。実際のCI実行結果の確認はこの後のPRで行う）。
+
+### 結果
+- ワークフローYAMLの構文はPythonのyamlモジュールでパース可能なことを確認済み（`on:`キーがPyYAMLの仕様上boolean Trueとして読み込まれるのはYAML 1.1の既知の挙動であり、GitHub Actions側のパーサーには影響しない）。
+- `build_windows.bat`の内容を読み、CI環境（非対話、`--noconfirm`済み、errorlevelチェックあり）で問題なく動作する構成であることを確認した。
+- 実際のCI実行結果（Windows上でのpytest・ビルド成功可否）は、本エントリ作成時点では未確認。次のPRでActionsの実行結果を確認する。
+
+### 次回開始位置
+- PRを作成し、Actionsの実行結果（pytest・PyInstallerビルド・Artifact生成）を確認する。失敗した場合は原因を調査し修正する。
+
+### 追記: 初回CI実行の失敗と修正
+- PR #3のCI（windows-latest、run 31609477972）で`pytest tests/`は26 passedだったが、PyInstallerのビルドが`rnnoise.dllが見つからない`エラーで失敗した。`--add-binary`の相対パスが`--specpath`（`build\output`）基準で解決される仕様のためだった。`app/build/build_windows.bat`で絶対パスに展開するよう修正した（D-004追記参照）。
+- このLinux環境ではPyInstallerのビルドフェーズ自体を一度も実行できていなかったため、CIをWindows上で実際に走らせて初めて発見できた問題であり、D-004でCIを追加した狙い（Windows固有の問題の可視化）がさっそく機能した形になる。
+- 修正をpushし、CIの再実行結果を確認する（次回開始位置）。
+
+---
+
 ## 2026-08-12 T-001 Reviewer再検証・完了
 
 ### 実施内容

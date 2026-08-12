@@ -1,0 +1,47 @@
+name: Build Windows executable
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - ".github/workflows/build-windows.yml"
+  pull_request:
+    paths:
+      - "app/**"
+      - ".github/workflows/build-windows.yml"
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    # PyInstallerはクロスコンパイル非対応のため、Windows向けexeは
+    # windows-latestランナー上でビルドする(docs/decisions.md D-001参照)。
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dev dependencies (test)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Run tests (Windows-native, RNNoise DLL経由)
+        run: python -m pytest tests/ -v
+
+      - name: Build SoloClarity.exe
+        shell: cmd
+        run: build\build_windows.bat
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SoloClarity-windows-exe
+          path: app/dist/SoloClarity.exe
+          if-no-files-found: error
+          retention-days: 30
