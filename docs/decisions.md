@@ -246,3 +246,26 @@
 - `pyflakes soloclarity tests`: 警告0件。
 - `app/soloclarity/gui/app.py`のみ変更(`App.__init__`への1行追加、`_on_close()`冒頭への6行のガード追加)。DSPロジック・config.py・engine.pyには手を入れていない。
 - 今後、`_on_close()`のように「待機中に`self.update()`等でイベントループを回す」実装を追加する場合、同じエントリポイントが待機中に再入され得ることを前提に、多重実行防止フラグを併せて検討すること。
+
+---
+
+## D-008: T-003完了に伴うversion 1.0.0への確定とビルドArtifactの命名強化
+
+- 日付: 2026-08-12
+- 状態: 採用
+
+### 背景
+- D-005〜D-007の3巡にわたる敵対的検証（合計6件の指摘、すべてCONFIRMEDで解消）を経て、Reviewerの最終所見は「このまま配布できる」となった。Issueの完成条件は「完成した最新版をビルドし、実際に利用できる配布ファイルを生成する」「古いビルドと混同しないようバージョン番号またはビルド日時を明確にする」ことを求めている。
+- `app/soloclarity/__init__.py`の`__version__`はD-001実装時点から`"0.1.0"`のままであり、GUIのウィンドウタイトルに表示されてはいた（D-005）が、値自体は開発中のプレースホルダのままだった。GitHub Actionsのビルド成果物（Artifact）名も`SoloClarity-windows-exe`固定で、過去のビルドと見分けがつかなかった。
+
+### 決定
+- `app/soloclarity/__init__.py`の`__version__`を`"0.1.0"`から`"1.0.0"`へ変更した。これは今回の総点検（T-003）を経て「配布可能」と判断された最初のバージョンであることを表す。
+- `.github/workflows/build-windows.yml`に「Read app version and build date」ステップを追加し、`soloclarity.__version__`とビルド日(UTC、`YYYYMMDD`)を取得。`actions/upload-artifact`のArtifact名を`SoloClarity-v{version}-{build_date}`（例: `SoloClarity-v1.0.0-20260812`）に変更し、過去のビルドと混同しないようにした。PyInstaller自体が生成するexeファイル名(`SoloClarity.exe`、`build_windows.bat`の`--name`指定)は変更していない（Artifact名で十分に区別可能であり、既に一度CI失敗・修正を経て安定しているビルドスクリプトへの変更を避けるため）。
+
+### 理由
+- バージョン番号は、開発中を示す`0.x`系から、最初の配布可能版であることを示す`1.0.0`への変更が、Semantic Versioningの慣例（`1.0.0`=最初の安定版）とも一致する。
+- Artifact名にバージョンとビルド日を含めることで、ユーザーがGitHub ActionsのArtifact一覧から最新版を一目で識別できるようになる。exeファイル名自体は変更せず、Artifactというダウンロード単位の命名だけで要件を満たすことで、変更範囲を最小限に抑えた（判定ラダー: 最小実装）。
+
+### 影響
+- 今後`app/`に変更を加えて新しいバージョンをリリースする場合は、`__version__`の更新を忘れないこと（GUIタイトル・Artifact名の両方に反映される）。
+- 本コミットのpushにより、GitHub Actionsで`v1.0.0-{ビルド日}`のArtifactが生成される。これが本Issue（総点検・完成化）の最終成果物となる。

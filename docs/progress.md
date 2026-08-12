@@ -19,6 +19,25 @@
 
 ---
 
+## 2026-08-12 T-003 完了(version 1.0.0確定・最終ビルド)
+
+### 実施内容
+- Reviewerの最終所見(3巡の敵対的検証で合計6件の指摘すべて解消(CONFIRMED)、「このまま配布できる」)を受け、Managerとして以下を実施した。
+  - `app/soloclarity/__init__.py`の`__version__`を`0.1.0`→`1.0.0`に変更(D-008参照)。
+  - `.github/workflows/build-windows.yml`に「Read app version and build date」ステップを追加し、Artifact名を`SoloClarity-v{version}-{build_date}`(例: `SoloClarity-v1.0.0-20260812`)に変更。過去のビルドと混同しないようにする(Issue完成条件)。
+  - `docs/tasks.md`のT-003を完了に更新。
+- コミット・プッシュ後、PRを作成しGitHub Actions(windows-latest)でのビルド成功を確認する(次回開始位置参照、本エントリ作成時点ではCI結果待ち)。
+
+### 結果
+- このLinux環境での再確認: `pytest tests/` 82 passed、`pyflakes soloclarity tests` 警告0件、YAML構文チェックOK。
+- T-003全体を通じた最終的な指摘解消状況: D-005で新規発見5件(High×2/Medium×1/Low×2)→D-006で対応→Reviewer再検証で新規1件(Medium)発見→D-007で対応→Reviewer最終再検証で全6件解消(CONFIRMED)確認。DSPロジック本体(`dsp/`配下)は今回の一連の修正で無変更、ソークテスト・音質関連の検証結果(D-005記載)に影響なし。
+- Windows実機・Discordでの実際の動作確認は、このLinux環境では引き続き実施不可能(D-001記載の既知の制約)。`app/WINDOWS_VERIFICATION_CHECKLIST.md`に沿ったユーザー側での最終確認が必要。
+
+### 次回開始位置
+- GitHub ActionsのCI実行結果を確認し、成功していればPRをマージして最終Artifact(`SoloClarity-v1.0.0-{ビルド日}`)のダウンロードリンクをユーザーへ案内する。失敗していれば原因を調査・修正する。
+
+---
+
 ## 2026-08-12 T-003 Reviewer差し戻し対応(修正ループ、D-005への5件の指摘すべて解消)
 
 ### 実施内容
