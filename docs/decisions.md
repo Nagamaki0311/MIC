@@ -144,3 +144,133 @@
 - ワークフロー追加直後の初回CI実行（PR #3, run 31609477972）で、`pytest tests/`は26 passedだったが、`python -m PyInstaller`が`ERROR: Unable to find 'D:\a\MIC\MIC\app\build\output\soloclarity\dsp\vendor\rnnoise.dll' when adding binary and data files.`で失敗した。このLinux開発環境ではPyInstallerのビルドフェーズ自体を一度も実行・検証できていなかったため（D-001の既知の制約）、実際にWindows上で走らせて初めて顕在化した問題である。
 - 原因: `--add-binary`に渡した相対パス（`soloclarity\dsp\vendor\rnnoise.dll`）を、PyInstallerがカレントディレクトリ（`app`）ではなく`--specpath`（`build\output`）基準で解決していた。`--workpath`/`--specpath`をbuild_windows.bat自身の置き場所（`app\build`）から分離するために導入したこの2オプションが、意図しない形で相対パス解決の基準まで変えてしまっていた。
 - 対応: `build_windows.bat`で`set "RNNOISE_DLL=%CD%\soloclarity\dsp\vendor\rnnoise.dll"`により絶対パスへ展開し、`--add-binary`にはその絶対パスを渡すよう修正した。CI（`.github/workflows/build-windows.yml`）を追加した直接の効果として、この問題をmainへ混入させる前にPR上で検出できた。
+
+---
+
+## D-005: T-003 最終総点検・完成化（敵対的検証による堅牢化）
+
+- 日付: 2026-08-12
+- 状態: 採用
+
+### 背景
+- T-001/T-002完了後、「実際に日常使用できる完成版として総点検し、問題があれば根本修正する」という最終仕上げタスク（T-003）を実施した。Managerの事前調査で、実際にDiscord通話中に困る可能性のある具体的な問題が4件（のちに高DPI対応を加えて5件）特定されていた。
+- 本セッションもLinuxのクラウドコンテナであり、D-001記載の制約（Windows実機・Discordクライアント・実オーディオデバイスなし）は変わらない。本エントリの実測値・検証結果はすべてこのLinux環境でのpytest自動テスト・合成信号によるDSP検証・xvfb環境でのGUIロジック検証・長時間ループの実測によるものであり、「Windows実機で確認した」「Discordで確認した」という主張は一切含まない。
+
+### 決定（確定済み5件のバグ修正）
+
+1. **`config.py`の`AppConfig.save()`を非アトミックからアトミックな書き込みへ変更**: `open(path, "w")`直書きを廃止し、同一ディレクトリ内に`tempfile.mkstemp()`で一時ファイルを作成→`json.dump()`→`os.replace()`でアトミックに置き換える方式にした。書き込み中に例外が起きた場合は一時ファイルを削除して再送出する。`tests/test_config.py::TestSaveIsAtomic::test_failed_write_does_not_corrupt_existing_config`で、`json.dump`を失敗させても既存の`config.json`が壊れず、一時ファイルも残らないことを実測確認した。
+2. **`AppConfig.load()`が非dict型のJSON（`null`/配列/文字列/数値等）を想定していなかった問題を修正**: `json.load()`成功後に`isinstance(data, dict)`を追加し、非dictならデフォルト設定へフォールバックするようにした。さらに、各フィールドについて型・値の妥当性を検証する`_FIELD_VALIDATORS`（`_is_valid_optional_str`/`_is_valid_preset`/`_is_valid_bool`/`_is_valid_advanced_overrides`）を追加し、型が違う値（例: `processing_enabled`が文字列）や存在しないプリセット名、非数値の`advanced_overrides`値が指定された場合も、そのフィールドだけデフォルト値へフォールバックするようにした（config.jsonは信頼境界の外にある入力のため、AGENTS.md設計原則8に従い検証を省略しなかった）。`tests/test_config.py::TestLoadHandlesCorruptedConfig`（9ケース: 構文エラー/非dict4種/フィールド欠落/型違い/不明プリセット/型違いadvanced_overrides/非数値override値/未知フィールド）ですべてクラッシュせずデフォルト相当へフォールバックすることを確認した。
+3. **`AudioEngine._callback`内の`self.chain.process(frame)`を例外から保護**: try/exceptで囲み、失敗時は入力フレームをそのまま出力へ流すバイパスにフォールバックするようにした。あわせて`AudioEngine.__init__`に`on_error`コールバック（`ErrorCallback = Callable[[str], None]`）を追加し、エラーメッセージをコールバックスレッドから呼び出し元へ伝播できるようにした。`tests/test_engine.py`で、`_callback`を実際のPortAudioストリームを介さず直接呼び出し、(a)例外発生時に出力が未加工の入力にフォールバックすること、(b)`on_error`が呼ばれること、(c)1フレームだけ失敗しても次のフレームからは正常に処理が復帰すること、(d)`on_error`未指定でも例外を送出しないこと、(e)通常経路・bypassモードに回帰がないこと、を確認した。
+4. **エラー表示の責務分離**: `app.py`にテスト再生ボタン専用の`test_status_var`とは別に、ストリーム全体の状態・エラー専用の`engine_status_var`（初期値「停止中」）を追加した。`_start_engine`のストリーム開始失敗、`AudioEngine.on_error`経由のコールバック内エラー、`_stop_engine`時の状態遷移をすべて`engine_status_var`へ反映し、`test_status_var`には触れないようにした。`tests/test_app_gui.py::TestEngineStatusIsSeparateFromTestStatus`で、エラー発生時に`engine_status_var`のみが変化し`test_status_var`は変化しないことをxvfb環境で実機検証した。
+5. **Windows高DPI対応の追加**: `app.py`に`_set_windows_dpi_awareness()`を追加し、`main()`の冒頭（`App()`構築前）で呼び出すようにした。`platform.system() != "Windows"`の時点で即座にreturnするため、Linux上のテスト実行は一切影響を受けない。Windows上では`ctypes.windll.shcore.SetProcessDpiAwareness(1)`（PROCESS_SYSTEM_DPI_AWARE）を試み、失敗しても（古いWindows・権限問題等）例外を握りつぶしてアプリ起動を継続する。`tests/test_app_gui.py::TestWindowsDpiAwareness`で、この関数がLinux上で例外を出さないこと（壊れたら失敗する最小限の確認）を確認した。実際の高DPI表示崩れの有無はこの環境では検証できないため、WINDOWS_VERIFICATION_CHECKLIST.mdに確認項目を追加した（決定内の「追加確認項目」参照）。
+
+### 決定（追加確認項目）
+
+- **RNNoiseライブラリが見つからない場合のエラー導線**: `App.__init__`で`VoiceChain(...)`の生成をtry/exceptで囲み、失敗時はウィンドウを`destroy()`した上で分かりやすいメッセージの`RuntimeError`を送出するようにした。`main()`側は`App()`構築を丸ごとtry/exceptし、失敗時は`tkinter.messagebox.showerror`で日本語のエラーダイアログを表示してから正常にreturnする（意味不明なスタックトレースで落ちない）。`tests/test_app_gui.py::TestVoiceChainInitFailureIsReportedClearly`で、RNNoiseライブラリ不在を模したケースが分かりやすい`RuntimeError`として起動シーケンスに伝播することを確認した。また本セッションのLinux環境自体、`soloclarity/dsp/vendor/`にRNNoise共有ライブラリが配置されていない（Windows配布時のみbuild_windows.batが配置する）ため、無加工で`App()`を構築するとこの経路が実際に発火することを手動検証でも確認した（意図的な開発環境の欠落であり、バグではない）。
+- **デバイス0件のハンドリング**: `tests/test_devices.py`で`sd.query_devices`が空リストを返すケースをモックし、`list_devices`/`list_input_devices`/`list_output_devices`/`guess_solocast_device`/`guess_cable_output_device`がクラッシュせず空/Noneを返すことを確認した。あわせて`tests/test_app_gui.py::TestZeroDevices`で、`device_lib.list_devices`をモンキーパッチしてデバイス0件の状態から`App()`を構築してもクラッシュせず、デバイス選択欄が空のままになることをxvfb環境で確認した。なお、この開発環境自体`sd.query_devices()`が実際に0件を返す（コンテナにオーディオハードウェアがない）ため、`_start_engine`が`PortAudioError: Error querying device -1`で失敗する経路を実機的にも確認できた（修正4のエラー表示先が正しく機能することの確認を兼ねる）。
+- **長時間動作の安定性（ソークテスト）**: `app/tests/soak_chain.py`を追加した。音声らしいsin波+ノイズ混合区間・無音区間・ノイズのみ区間を3秒周期で切り替える合成信号を10万フレーム（1000秒相当）処理し、10,000フレームごとにRSS（`resource.getrusage(...).ru_maxrss`、POSIX限定でWindowsでは自動skip）を記録、先頭1万フレームと末尾1万フレームの平均処理時間を比較した。**実測結果（このLinux環境、`python -m tests.soak_chain`）**: RSSはウォームアップ後（10%地点）54,784KBから最終55,168KBまで**成長率1.007倍**（閾値1.3倍を大きく下回る）、フレーム処理時間は先頭1万フレーム平均0.6945ms、末尾1万フレーム平均0.6958msで**比率1.002倍**（閾値1.5倍を大きく下回る）。無制限なメモリ増加・処理時間劣化は確認されなかった。実行時間は約71秒。
+- **プリセット・詳細設定の高頻度切り替え**: `tests/test_chain.py::TestHighFrequencyParameterSwitching`で、`set_preset`/`set_clarity`/`set_noise`/`set_compressor`/`set_agc`をランダムに3,000回呼び出すループを追加し、例外が出ないこと、および`chain._rnnoise_state`/`chain._rnnoise_library`のオブジェクトIDが呼び出し前後で完全に同一である（再作成されていない）ことを確認した。コードレビューでも、`VoiceChain.set_preset`等の実装（`app/soloclarity/dsp/chain.py`）が`_rnnoise_state`/`_rnnoise_library`に一切触れていないこと（`__init__`でのみ生成、`close()`でのみ破棄）を確認済み。
+- **音質: ノイズゲートの語尾・小さい声の欠落**: `tests/test_gate.py::TestGateAgainstNoiseStagePresets`で、実際の3段階ノイズ除去プリセット（`presets.NOISE_STAGES`）それぞれの`gate_threshold`/`gate_release_ms`を使い、(a)発話確率が閾値をわずかに超える程度の小さい声を想定した信号が5フレーム（50ms）以内に十分開くこと（頭の欠落がないこと）、(b)発話確率が閾値を割った直後の1フレームで無音まで落ちない（release_msに応じて緩やかに減衰する、語尾が唐突に切れない）ことを、弱/標準/強すべてで確認した。
+- **音質: コンプレッサーの急激な音量変化**: `tests/test_chain.py::TestCompressorSmoothness`で、小（peak -26dBFS相当）→大（peak -6dBFS相当）→小の音量ジャンプを含む信号を`discord_call`プリセットのコンプレッサー単体（`_build_compressor_board`）に通し、フレーム間（10ms）のRMS dB変化量の最大値が、無加工の生信号におけるフレーム間dB変化量の最大値を上回らないことを確認した（コンプレッサーが変化をより急激にしていないことの直接的な検証）。
+- **音質: リミッターの発動頻度**: `tests/test_chain.py::TestLimiterEngagementFrequency`で、ceiling（-1.0dBFS）より十分低いpeak -10dBFS相当の通常音量の信号をリミッター単体（`_build_limiter_board`）に通し、出力RMSが入力RMSの98%を上回る（ほぼ減衰なし=gain reductionがほぼ0）ことを確認した。
+- **設計の整理**: `app/soloclarity/`を通読し、未使用コードを2件発見・削除した。(1) `app/soloclarity/gui/app.py`の`METER_UPDATE_INTERVAL_MS`定数（定義のみでどこからも参照されていなかった。メーター更新は`AudioEngine.on_meter_update`経由でオーディオコールバックが直接駆動しており、ポーリング用のこの定数は使われていなかった）。(2) `app/soloclarity/dsp/gate.py`の`SpeechProbabilityGate.reset()`メソッド（`VoiceChain.set_noise_stage`はゲートインスタンスを毎回新規生成しており、既存インスタンスをリセットする経路がどこにも存在しなかった）。それ以外の関数・メソッドはすべて呼び出し元が存在することを`grep`で確認した（判定ラダー1: YAGNI）。
+- **依存関係の再確認**: `requirements.txt`（sounddevice/pedalboard/numpy）、`requirements-dev.txt`（pytest/pyrnnoise追加）は実際のimport文（`grep -rhoE "^import ...|^from ... import" soloclarity`）と一致しており、未使用の依存は無かった。新規パッケージは追加していない。
+- **バージョン表示**: `app/soloclarity/__init__.py`の`__version__`をウィンドウタイトルへ表示するようにした（`"SoloClarity" → f"SoloClarity v{__version__}"`）。バージョン番号自体（`0.1.0`）は変更していない。
+- **WINDOWS_VERIFICATION_CHECKLIST.mdの拡充**: この環境では実施不可能な確認観点（高DPI環境での表示崩れ、デバイスの抜き差し、Discordとの起動順序、スリープ・スタンバイからの復帰、Windows起動直後の動作、長期間の実運用）を新たに10〜15節として追加した。既存の1〜9節（ビルド・デバイス認識・仮想マイク出力・Discordでの聞き取りやすさ・テストボタン・CPU/メモリ実測・遅延実測・設定の保存復元・アンインストール）と重複する項目（CPU/メモリのタスクマネージャ確認、遅延の体感、Discordからの認識）は追加していない。
+
+### 理由
+- 判定ラダー（AGENTS.md）の「バグは根本原因を直す」に従い、いずれの修正も症状（config.jsonが壊れる、音が止まる、エラーメッセージがどこに出るか分からない）ではなく構造上の原因（非アトミック書き込み、無防備な型仮定、例外の握りつぶし不在、責務混在、DPI非対応）を直した。
+- 追加確認項目は、Issueが求める「実際に日常使用できる完成版」という完了基準に対し、この環境で実際に実行・実測できる範囲（pytest自動テスト・合成信号によるDSP検証・xvfbでのGUIロジック検証・長時間ループの実測）で敵対的検証（REVIEW.md）の観点を先取りして潰したもの。Windows実機・Discord経由の主観評価はD-001の制約により引き続きユーザーの最終確認が必要。
+
+### 影響
+- `pytest tests/`（このLinux環境）: **66 passed**（既存26件 + 新規40件、`tests/bench_chain.py`・`tests/soak_chain.py`は従来どおりファイル名が`test_*.py`パターンに一致しないため`pytest tests/`の既定収集対象外。個別に`pytest tests/bench_chain.py`/`pytest tests/soak_chain.py`または`python -m tests.bench_chain`/`python -m tests.soak_chain`で実行する既存の運用を踏襲）。
+- `pyflakes soloclarity tests`: 警告0件。
+- `python -m tests.bench_chain`（1000フレーム、この修正後の再測定）: 平均0.6991ms/フレーム（10ms予算の7.0%）。
+- 新規テストファイル: `app/tests/test_config.py`（12件）、`app/tests/test_engine.py`（5件）、`app/tests/test_devices.py`（2件）、`app/tests/test_app_gui.py`（7件、xvfb環境）、`app/tests/soak_chain.py`（1件、個別実行）。既存ファイルへの追加: `test_chain.py`（+3件）、`test_gate.py`（+6件）。
+- `app/tests/conftest.py`に`gui_display`フィクスチャを追加した。`DISPLAY`が未設定でもLinux上に`Xvfb`があれば自動的に一時ディスプレイを起動し、無ければGUIテストをスキップする（新規pip依存を追加せず、既存のシステムバイナリのみで完結させる設計）。
+- 今後、config.jsonのフィールドを追加する場合は`_FIELD_VALIDATORS`にも対応するバリデータを追加すること。AudioEngineに新しいコールバックを追加する場合も、GUI側のスレッド安全性（`self.after(0, ...)`経由でのメインスレッド復帰）を踏襲すること。
+
+---
+
+## D-006: T-003 Reviewer指摘対応（High×2, Medium×1, Low×2, すべてCONFIRMED）
+
+- 日付: 2026-08-12
+- 状態: 採用
+
+### 背景
+- D-005の実装（コミット913189c）に対し、別セッションのReviewerが独立に敵対的検証を行い、5件の指摘（High×2, Medium×1, Low×2）を返した。いずれも実際にコード・挙動を確認した上でのCONFIRMED判定であり、Managerの指示に従いすべて対応した。
+
+### 決定
+
+1. **advanced_overridesへのNaN混入によるアプリ恒久起動不能（High, CONFIRMED）**: `config.py`の`_is_valid_advanced_override_value`（旧`_is_valid_advanced_overrides`）に`math.isfinite(value)`チェックを追加し、NaN/Infinity/-Infinityをすべて拒否するようにした。JSONの`NaN`/`Infinity`/`-Infinity`トークンはPythonの`json.load`のデフォルト設定でそのまま`float('nan')`等として読み戻され、`tk.Scale.set(nan)`が`TclError`を送出して`App.__init__`から`main()`の`except Exception`まで伝播していた（起動失敗はするが、config.json側のNaN値を修復する処理が無いため次回起動時も確実に再現していた）。あわせて`AppConfig.save()`側にも`json.dump(..., allow_nan=False)`を追加し、書き込み・読み込み両方の信頼境界で有限性を防御するようにした（万一有限でない値がセルフに紛れ込んでも、書き込み時点で早期に`ValueError`となり、壊れた`config.json`が生成されることはない）。`tests/test_config.py::TestAdvancedOverridesRejectNonFiniteValues`（NaN/Infinity/-Infinityそれぞれの読み込み側フォールバック、save側のValueError）で確認した。
+2. **`AudioEngine.start()`でのPa_StartStream失敗時のストリームハンドルリーク（High, CONFIRMED）**: `start()`を、`sd.Stream(...)`(Pa_OpenStream相当)をローカル変数`stream`に受け、`.start()`(Pa_StartStream相当)をtry/exceptで囲み、失敗時は`stream.close()`してから例外を再送出し、成功時のみ`self._stream = stream`とする実装に変更した。`sounddevice.Stream`に`__del__`は無くGCでも解放されないため、修正前は開いたストリームがリークし、`self._stream`への参照も残らないため追跡・再利用の手段が完全に失われていた。Issueが名指しした「エンジンの高頻度start/stop」で他アプリとのデバイス排他競合等によりPa_StartStreamのみが繰り返し失敗するケースを想定し、`tests/test_engine.py::TestStartClosesStreamOnPaStartStreamFailure`で、単発の失敗時に`close()`が呼ばれ`self._stream`が`None`のままであること、成功時は`close()`が呼ばれないこと、50回連続で失敗させても毎回`close()`されリークが蓄積しないことを確認した（`sd.Stream`をフェイクに差し替えて検証）。
+3. **テストボタンworker threadのTkinter操作がself.after()経由でない（Medium, CONFIRMED/PLAUSIBLE）**: `_on_test_clicked`のworker関数内`self.test_status_var.set(...)`/`self.test_button.configure(...)`をすべて`self.after(0, lambda: ...)`経由に変更し、`_on_meter_update`/`_on_engine_error`と同じスレッドセーフなパターンに統一した。あわせて`_on_close()`で、テストボタンのworker threadが実行中の場合は`self.chain.close()`する前に完了を待つようにし、`chain.process()`(worker内)と`chain.close()`(メインスレッド)が競合する構造的リスクを避けた。
+   - **実装上の重要な追加検証**: 当初`self._test_thread.join(timeout=...)`という単純なブロッキング待機で実装したところ、Reviewerとの往復（コンテキスト切れによる引き継ぎを含む）の中で、xvfb実機検証により**単純な`join()`では正しく機能しないことが判明した**。Tkinterの`self.after(0, ...)`をバックグラウンドスレッドから呼ぶには、メインスレッドが実際に`mainloop()`でTclのイベントループを処理している必要があり、メインスレッドが素の`Thread.join()`でブロックしている間はworker側の`after()`呼び出しがメインスレッドの応答を待って停止する（実測: `join(timeout=2)`のケースで、workerの`after()`呼び出しがまさに2秒間ブロックし、joinがタイムアウトして初めて解放された）。この状態が続くと`_on_close()`が無意味に最大タイムアウト分(11秒)ブロックし、その後`self.destroy()`で対象のTclインタプリタが破棄されるとworker側のブロックが恒久的に解消しない可能性があった。
+   - **最終対応**: `_on_close()`のworker待機を、単純な`join()`ではなく`self.update()`を挟みながらポーリングするループ（`while thread.is_alive() and time.monotonic() < deadline: self.update(); time.sleep(0.01)`）に変更した。`self.update()`がTclのイベントループを処理することでworker側の`after()`呼び出しが解放され、正しく完了する。実機検証で、この修正により`_on_close()`が実際のworker処理時間（例: 0.2秒程度のダミー再生)とほぼ同じ時間で返ることを確認した(修正前の単純joinでは最大タイムアウトの11秒までブロックしていた)。
+   - **テスト設計上の教訓**: 上記と同じ理由で、`tests/test_app_gui.py`のテストコード自体も`app.mainloop()`を実際に走らせる必要がある(単に`app.update()`をポーリングするだけのテストでは、workerスレッド側の最初の`self.after(0, ...)`呼び出し自体が`RuntimeError: main thread is not in main loop`になる)。最終的に、`app.mainloop()`をテストのメインスレッドで実際に走らせ、workerの完了を監視する別スレッド(watcher)が`app.after(0, app.quit)`でmainloopを止める構成にした(安全弁として`app.after(タイムアウトms, app.quit)`も設定)。`tests/test_app_gui.py::TestTestButtonThreadSafety`の2ケース(通常完了、テストボタン直後にウィンドウを閉じるケース)で確認した。
+4. **advanced_overridesのバリデーションがall-or-nothing（Low, CONFIRMED）**: `config.py`の`AppConfig.load()`で、`advanced_overrides`のみ`_FIELD_VALIDATORS`の対象外とし、`_sanitize_advanced_overrides()`でキー単位に検証するよう再設計した。1項目でも不正なら辞書全体を破棄していた挙動を、不正なキーだけを取り除き正当な値は保持する挙動に変更した。`tests/test_config.py::TestAdvancedOverridesPartialValidity`で、1件の不正値が他の正当な設定を巻き込んで破棄しないこと、複数の不正値・正常値が混在する場合も個別に判定されることを確認した。
+5. **極端値への安全性がTkinterのclamp挙動という暗黙の実装詳細にのみ依存（Low, CONFIRMED）**: `app.py`に`_ADVANCED_SLIDER_RANGES`(`ADVANCED_SLIDER_SPECS`のmin/maxから構築)と`_clamp()`ヘルパーを追加し、`_apply_advanced_overrides()`でconfig由来の値を`tk.Scale.set()`へ渡す前に明示的にクランプするようにした。`tests/test_app_gui.py::TestExtremeAdvancedOverrideValuesAreClamped`で、`1e9`・`-1e9`・`1e12`等の極端な値を注入してもスライダー値・`VoiceChain`側の実パラメータ(`chain.agc.target_linear`等)が仕様範囲内かつ有限であることを直接検証した。
+
+### 理由
+- いずれもAGENTS.md「バグは根本原因を直す」に従い、信頼境界（config.json、PortAudioのネイティブAPI境界、Tkinterのスレッド境界）での検証・後始末の欠落という構造的原因を直した。
+- 指摘3の対応過程で発覚した「単純な`Thread.join()`はTkinterのバックグラウンドスレッド`after()`呼び出しと相互にブロックし得る」という事実は、Reviewer指摘自体が言及していなかった追加のリスクだったが、実装時の実機検証(xvfb)で発見したため、症状を隠す表面的な修正（例えばjoinのタイムアウトを単に伸ばす等）ではなく、根本原因（Tclのメインループ要求とブロッキング待機の非両立）に対処する形にした。
+
+### 影響
+- `pytest tests/`（このLinux環境）: **81 passed, 0 failed**(D-005時点の66件 + 今回の新規15件。内訳: `test_config.py` 17→25件(+8、指摘1・4対応)、`test_engine.py` 5→8件(+3、指摘2対応)、`test_app_gui.py` 7→11件(+4、指摘3・5対応))。`tests/bench_chain.py`・`tests/soak_chain.py`は引き続き個別実行(このLinux環境で両方とも再実行し、リグレッションがないことを確認: `bench_chain`平均約0.7ms/フレーム、`soak_chain`はRSS成長率・処理時間比率とも安定した範囲内)。
+- `pyflakes soloclarity tests`: 警告0件。
+- `app/soloclarity/config.py`・`app/soloclarity/audio/engine.py`・`app/soloclarity/gui/app.py`を変更。DSPロジック本体(`app/soloclarity/dsp/`配下)には一切手を入れていない。
+- 今後、`self.after(0, ...)`をバックグラウンドスレッドから呼ぶコードを追加する場合、そのスレッドの完了を待つ側(メインスレッド)は単純な`Thread.join()`ではなく、`self.update()`を挟むポーリングパターンを使うこと(本エントリの指摘3対応・`_on_close()`実装を参照)。同様に、この種のスレッド間協調をxvfb環境でテストする場合は、`app.mainloop()`を実際に走らせるテスト構成(`tests/test_app_gui.py::TestTestButtonThreadSafety`参照)が必要であり、`app.update()`のポーリングだけでは代替できない。
+
+---
+
+## D-007: T-003 Reviewer再指摘対応（`_on_close()`の再入によるTclError, Medium, CONFIRMED）
+
+- 日付: 2026-08-12
+- 状態: 採用
+
+### 背景
+- D-006の修正（コミットedd73b2）をReviewerが再検証し、指摘1・2・4・5は解消をCONFIRMEDした。一方、指摘3の対応そのもの（`_on_close()`を`self.update()`ポーリング待機に変更したこと）が新たな問題を持ち込んでいることが判明した。
+- `_on_close()`はworker thread完了待ちの間、最大`TEST_THREAD_JOIN_TIMEOUT_SECONDS`(11秒)`self.update()`をポーリングし続けるが、この待機ループ中はTclのイベントループが実際に回っている。そのため、ユーザーが待機中にもう一度閉じる操作(ウィンドウのXボタン等)をすると`_on_close()`が再入(nested)呼び出しされ得る。Reviewerは`app.after()`で`_on_close`を2回ディスパッチする形で実際に再現し、内側の呼び出しが先に`self.destroy()`まで完了した後、外側の呼び出しが自分の`self.destroy()`に到達した時点で`_tkinter.TclError: can't invoke "destroy" command: application has been destroyed`が発生することを確認した(mainloop()自体はクラッシュせず正常終了し、`_stop_engine()`/`chain.close()`は多重呼び出しに対して既に安全だったため実害は限定的だが、未処理例外のログが出る)。
+
+### 決定
+- `App.__init__`に`self._closing = False`を追加し、`_on_close()`冒頭で`if self._closing: return`(多重実行防止フラグ)を追加した。フラグを立てた後に`_save_config()`・worker待機ループ・`_stop_engine()`・`chain.close()`・`self.destroy()`を実行する構成にすることで、待機ループの`self.update()`経由で`_on_close()`が再入されても、2回目以降の呼び出しは即座にreturnし、`self.destroy()`が二重に呼ばれることがなくなる。
+- `tests/test_app_gui.py::TestTestButtonThreadSafety::test_reentrant_close_while_waiting_for_worker_does_not_raise`を追加した。Reviewerの再現方法(`app.after()`で`_on_close`を2回ディスパッチする)を踏襲し、`app.mainloop()`を実際に走らせながらworker実行中(0.3秒のダミー再生)に`_on_close()`を`app.after(0, ...)`と`app.after(20, ...)`の2回スケジュールし、いずれの呼び出しも例外を出さないことを確認する。
+- **検証**: このテストが実際に指摘内容を再現・検出できることを、ガード(`if self._closing: return`)を一時的に取り除いたコードに対して同テストを実行することで確認した。ガード無しでは`errors == [TclError('can\'t invoke "destroy" command: application has been destroyed')]`となりテストが失敗し、ガードを戻すとpassすることを確認した(テストの実効性そのものを検証する二重チェック)。
+
+### 理由
+- AGENTS.md「バグは根本原因を直す」に従い、`_on_close()`という単一のエントリポイントに再入防止フラグを置くことで、Xボタン連打・ウィンドウマネージャからの複数回のクローズイベント等、どの経路から再度`_on_close()`が呼ばれても一箇所で確実に防げるようにした(個々の呼び出し元にガードを分散させない)。
+- D-006の対応(`self.update()`ポーリング)自体は、Tkinterのバックグラウンドスレッド`after()`呼び出しの要求(メインスレッドが実際にイベントループを処理していること)を満たすために必要な変更であり、撤回はしない。今回はその変更が新たに開けた「待機ループ中はイベントループが回っている」という窓に対して、再入防止フラグで閉じる形にした。
+
+### 影響
+- `pytest tests/`(このLinux環境): **82 passed, 0 failed**(D-006時点の81件 + 今回の新規1件、`tests/test_app_gui.py`)。5回連続実行してもフレーキーな失敗なし。
+- `pyflakes soloclarity tests`: 警告0件。
+- `app/soloclarity/gui/app.py`のみ変更(`App.__init__`への1行追加、`_on_close()`冒頭への6行のガード追加)。DSPロジック・config.py・engine.pyには手を入れていない。
+- 今後、`_on_close()`のように「待機中に`self.update()`等でイベントループを回す」実装を追加する場合、同じエントリポイントが待機中に再入され得ることを前提に、多重実行防止フラグを併せて検討すること。
+
+---
+
+## D-008: T-003完了に伴うversion 1.0.0への確定とビルドArtifactの命名強化
+
+- 日付: 2026-08-12
+- 状態: 採用
+
+### 背景
+- D-005〜D-007の3巡にわたる敵対的検証（合計6件の指摘、すべてCONFIRMEDで解消）を経て、Reviewerの最終所見は「このまま配布できる」となった。Issueの完成条件は「完成した最新版をビルドし、実際に利用できる配布ファイルを生成する」「古いビルドと混同しないようバージョン番号またはビルド日時を明確にする」ことを求めている。
+- `app/soloclarity/__init__.py`の`__version__`はD-001実装時点から`"0.1.0"`のままであり、GUIのウィンドウタイトルに表示されてはいた（D-005）が、値自体は開発中のプレースホルダのままだった。GitHub Actionsのビルド成果物（Artifact）名も`SoloClarity-windows-exe`固定で、過去のビルドと見分けがつかなかった。
+
+### 決定
+- `app/soloclarity/__init__.py`の`__version__`を`"0.1.0"`から`"1.0.0"`へ変更した。これは今回の総点検（T-003）を経て「配布可能」と判断された最初のバージョンであることを表す。
+- `.github/workflows/build-windows.yml`に「Read app version and build date」ステップを追加し、`soloclarity.__version__`とビルド日(UTC、`YYYYMMDD`)を取得。`actions/upload-artifact`のArtifact名を`SoloClarity-v{version}-{build_date}`（例: `SoloClarity-v1.0.0-20260812`）に変更し、過去のビルドと混同しないようにした。PyInstaller自体が生成するexeファイル名(`SoloClarity.exe`、`build_windows.bat`の`--name`指定)は変更していない（Artifact名で十分に区別可能であり、既に一度CI失敗・修正を経て安定しているビルドスクリプトへの変更を避けるため）。
+
+### 理由
+- バージョン番号は、開発中を示す`0.x`系から、最初の配布可能版であることを示す`1.0.0`への変更が、Semantic Versioningの慣例（`1.0.0`=最初の安定版）とも一致する。
+- Artifact名にバージョンとビルド日を含めることで、ユーザーがGitHub ActionsのArtifact一覧から最新版を一目で識別できるようになる。exeファイル名自体は変更せず、Artifactというダウンロード単位の命名だけで要件を満たすことで、変更範囲を最小限に抑えた（判定ラダー: 最小実装）。
+
+### 影響
+- 今後`app/`に変更を加えて新しいバージョンをリリースする場合は、`__version__`の更新を忘れないこと（GUIタイトル・Artifact名の両方に反映される）。
+- 本コミットのpushにより、GitHub Actionsで`v1.0.0-{ビルド日}`のArtifactが生成される。これが本Issue（総点検・完成化）の最終成果物となる。
+
+### 追記（2026-08-12・PR #4のCI実行での修正）
+- PR #4のCI（windows-latest、run 31643953024）で、`tests/test_app_gui.py::TestWindowsDpiAwareness::test_no_op_and_does_not_raise_on_linux`が`AssertionError: assert 'Windows' != 'Windows'`で失敗した。このテストは「`_set_windows_dpi_awareness()`がLinux上でno-opであること」を検証する意図で、テスト自体の前提確認として`assert platform.system() != "Windows"`を書いていたが、T-003でCIをwindows-latestでも実行するようになった結果、Windows上でこのテスト自体が実行され、前提確認が自己矛盾で失敗する状態になっていた（D-005実装時点ではこのテストはこのLinux開発環境でしか実行されていなかったため、Windows上での実行は今回のCI実行が初めてだった）。
+- テストをプラットフォームに依存しない形（`_set_windows_dpi_awareness()`がどのプラットフォームでも例外を送出しないことのみを確認）に修正した。Linux上では既存どおりno-opパス、Windows上では実際のDPI awareness試行パス（失敗しても例外を握りつぶす、D-005参照）をそれぞれ検証する形になり、むしろWindows実機での初めての実行検証という副次的な価値も得られた。
+- このLinux環境で`pytest tests/test_app_gui.py`を再実行し12件すべてpassすることを確認済み（Windows上での再実行結果はCIの次回実行で確認する）。

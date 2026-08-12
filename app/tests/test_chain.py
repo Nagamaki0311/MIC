@@ -179,3 +179,119 @@ class TestChainSanity:
         chain = chain_factory()
         with pytest.raises(AssertionError):
             chain.process(np.zeros(FRAME_SIZE, dtype=np.float64))
+
+
+class TestHighFrequencyParameterSwitching:
+    """プリセット・詳細設定の高頻度切り替えでも例外が出ず、RNNoiseのネイティブ状態が
+    再作成されない(リークしない)ことを確認する。"""
+
+    def test_rapid_random_switching_does_not_raise_and_keeps_rnnoise_state(self, chain_factory):
+        chain = chain_factory("discord_call")
+        original_rnnoise_state = chain._rnnoise_state
+        original_rnnoise_library = chain._rnnoise_library
+        rng = np.random.default_rng(3)
+
+        def _random_preset():
+            chain.set_preset(str(rng.choice(list(presets.PRESET_ORDER))))
+
+        def _random_clarity():
+            chain.set_clarity(str(rng.choice(list(presets.CLARITY_LEVELS))))
+
+        def _random_noise():
+            chain.set_noise(str(rng.choice(list(presets.NOISE_LEVELS))))
+
+        def _random_compressor():
+            chain.set_compressor(
+                presets.CompressorParams(
+                    threshold_db=float(rng.uniform(-40, 0)),
+                    ratio=float(rng.uniform(1, 10)),
+                    attack_ms=float(rng.uniform(1, 50)),
+                    release_ms=float(rng.uniform(50, 500)),
+                )
+            )
+
+        def _random_agc():
+            chain.set_agc(
+                presets.AgcParams(
+                    target_dbfs=float(rng.uniform(-30, -6)),
+                    max_gain_db=float(rng.uniform(0, 24)),
+                )
+            )
+
+        setters = [_random_preset, _random_clarity, _random_noise, _random_compressor, _random_agc]
+
+        for _ in range(3000):
+            setters[rng.integers(0, len(setters))]()
+
+        # RNNoiseのネイティブハンドルは__init__時の1回だけ作られ、set_preset等の
+        # 呼び出しでは再作成されない(再作成されるとrnnoise_destroyされないネイティブ
+        # ハンドルがリークする)。
+        assert chain._rnnoise_state is original_rnnoise_state
+        assert chain._rnnoise_library is original_rnnoise_library
+
+        # 切り替え後もprocess()が正常に動くこと。
+        t = np.arange(FRAME_SIZE) / SAMPLE_RATE
+        frame = (0.1 * np.sin(2 * np.pi * 180 * t)).astype(np.float32)
+        out, speech_prob = chain.process(frame)
+        assert out.shape == (FRAME_SIZE,)
+        assert out.dtype == np.float32
+        assert 0.0 <= speech_prob <= 1.0
+
+
+class TestCompressorSmoothness:
+    """コンプレッサーが音量の急変(小->大->小)を、無加工の生信号より滑らかにすることを確認する。"""
+
+    def test_compressor_does_not_amplify_volume_jumps(self):
+        sr = SAMPLE_RATE
+        amplitudes = [0.05] * 40 + [0.5] * 40 + [0.05] * 40
+
+        raw_frames = []
+        for i, amp in enumerate(amplitudes):
+            t = (np.arange(FRAME_SIZE) + i * FRAME_SIZE) / sr
+            raw_frames.append((amp * np.sin(2 * np.pi * 200 * t)).astype(np.float32))
+        raw = np.concatenate(raw_frames)
+
+        preset = presets.PRESETS["discord_call"]
+        board = chain_mod._build_compressor_board(preset.compressor)
+        processed = board.process(raw, sr)
+
+        def frame_rms_db_series(signal: np.ndarray) -> list[float]:
+            values = []
+            for i in range(0, len(signal), FRAME_SIZE):
+                chunk = signal[i : i + FRAME_SIZE]
+                r = float(np.sqrt(np.mean(chunk.astype(np.float64) ** 2)))
+                values.append(20.0 * np.log10(max(r, 1e-9)))
+            return values
+
+        raw_db = frame_rms_db_series(raw)
+        out_db = frame_rms_db_series(processed)
+
+        raw_max_jump = max(abs(b - a) for a, b in zip(raw_db, raw_db[1:]))
+        out_max_jump = max(abs(b - a) for a, b in zip(out_db, out_db[1:]))
+
+        assert out_max_jump <= raw_max_jump + 1e-6
+
+
+class TestLimiterEngagementFrequency:
+    """通常の音量範囲(クリップしない入力)ではリミッターがほぼ発動しないことを確認する。"""
+
+    def test_limiter_barely_attenuates_normal_level_signal(self):
+        sr = SAMPLE_RATE
+        amplitude = 10 ** (-10.0 / 20.0)  # peak -10dBFS(ceiling -1.0dBFSより十分低い)
+
+        frames = []
+        for i in range(50):
+            t = (np.arange(FRAME_SIZE) + i * FRAME_SIZE) / sr
+            frames.append((amplitude * np.sin(2 * np.pi * 200 * t)).astype(np.float32))
+        raw = np.concatenate(frames)
+
+        board = chain_mod._build_limiter_board()
+        out = board.process(raw, sr)
+
+        # 最初のフレーム(リミッターのウォームアップ)を除いた区間で比較する。
+        warm_raw = raw[FRAME_SIZE:]
+        warm_out = out[FRAME_SIZE:]
+        raw_rms = float(np.sqrt(np.mean(warm_raw.astype(np.float64) ** 2)))
+        out_rms = float(np.sqrt(np.mean(warm_out.astype(np.float64) ** 2)))
+
+        assert out_rms / raw_rms > 0.98

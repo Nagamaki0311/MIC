@@ -39,9 +39,20 @@ jobs:
         shell: cmd
         run: build\build_windows.bat
 
+      - name: Read app version and build date
+        id: version
+        shell: bash
+        run: |
+          version=$(python -c "from soloclarity import __version__; print(__version__)")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "build_date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      # Artifact名にバージョン・ビルド日時(UTC)を明記し、過去のビルドと
+      # 混同しないようにする(Issue原文の完成条件)。exe自体のファイル名
+      # (SoloClarity.exe)はbuild_windows.batの既存挙動から変更しない。
       - uses: actions/upload-artifact@v4
         with:
-          name: SoloClarity-windows-exe
+          name: SoloClarity-v${{ steps.version.outputs.version }}-${{ steps.version.outputs.build_date }}
           path: app/dist/SoloClarity.exe
           if-no-files-found: error
           retention-days: 30
