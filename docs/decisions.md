@@ -274,3 +274,30 @@
 - PR #4のCI（windows-latest、run 31643953024）で、`tests/test_app_gui.py::TestWindowsDpiAwareness::test_no_op_and_does_not_raise_on_linux`が`AssertionError: assert 'Windows' != 'Windows'`で失敗した。このテストは「`_set_windows_dpi_awareness()`がLinux上でno-opであること」を検証する意図で、テスト自体の前提確認として`assert platform.system() != "Windows"`を書いていたが、T-003でCIをwindows-latestでも実行するようになった結果、Windows上でこのテスト自体が実行され、前提確認が自己矛盾で失敗する状態になっていた（D-005実装時点ではこのテストはこのLinux開発環境でしか実行されていなかったため、Windows上での実行は今回のCI実行が初めてだった）。
 - テストをプラットフォームに依存しない形（`_set_windows_dpi_awareness()`がどのプラットフォームでも例外を送出しないことのみを確認）に修正した。Linux上では既存どおりno-opパス、Windows上では実際のDPI awareness試行パス（失敗しても例外を握りつぶす、D-005参照）をそれぞれ検証する形になり、むしろWindows実機での初めての実行検証という副次的な価値も得られた。
 - このLinux環境で`pytest tests/test_app_gui.py`を再実行し12件すべてpassすることを確認済み（Windows上での再実行結果はCIの次回実行で確認する）。
+
+---
+
+## D-009: SoloCast→CABLE Input間のストリーム開始エラー(PaErrorCode -9993)の原因特定
+
+- 日付: 2026-08-12
+- 状態: 採用
+
+### 背景
+- ユーザーがv1.0.0のexeをWindows実機で実際に起動し、マイク(HyperX SoloCast)と出力先(CABLE Input, VB-Audio Virtual Cable)を選んで処理を開始したところ、「ストリーム開始エラー: Error opening Stream: Illegal combination of I/O devices [PaErrorCode -9993]」が発生し、コア機能(SoloCast入力→処理→仮想マイク出力)が動作しないことが判明した。これはこのLinux開発環境では実オーディオデバイスがないため一度も検出できなかった不具合であり、D-001に記載した既知の制約（Windows実機での動作確認が必要）がまさに顕在化した事例である。
+- PaErrorCode -9993はPortAudioの`paBadIODeviceCombination`に対応する。`app/soloclarity/audio/engine.py`の`AudioEngine.start()`は、`sd.Stream(device=(input_device, output_device), channels=1, callback=self._callback)`という単一の双方向(full-duplex)ストリームで、入力(SoloCast、実ハードウェア)と出力(CABLE Input、VB-Audio製の仮想デバイス)という**別々の物理・仮想デバイス**を結合しようとしていた。WASAPIでは、異なるデバイス同士(特に別クロックドメインを持つデバイス)を1本のフルデュプレックスストリームに結合することは一般的にサポートされておらず、この組み合わせで`paBadIODeviceCombination`が返るのはPortAudio/sounddeviceのよく知られた制約である。
+
+### 決定
+- `AudioEngine`の内部実装を、単一の`sd.Stream`から、独立した`sd.InputStream`(SoloCast側)と`sd.OutputStream`(CABLE Input側)の2本構成に変更する。両ストリームはそれぞれ別デバイス・別クロックで動作するため、小さな有界のリングバッファ(ジッタバッファ)で橋渡しする。
+  - 入力側コールバック: フレームを読み取り、入力メーターを更新し、`chain.process()`(または`bypass`)を実行し、処理後フレームをリングバッファへpushする。バッファが満杯(出力側の消費が追いついていない)の場合は最も古いフレームを破棄して詰まりを回避する。
+  - 出力側コールバック: リングバッファから次のフレームをpopしてそのまま出力する。バッファが空(アンダーラン、起動直後やクロックドリフトで一時的に発生し得る)の場合は無音を出力し、ノイズや未初期化メモリの出力を避ける。
+  - 既存の例外保護(`chain.process()`のtry/except→bypass+`on_error`)・スレッドセーフなエラー伝達の契約は維持する。
+  - `start()`/`stop()`は両ストリームをセットで管理し、一方が開けても他方が失敗した場合は、開いた方を`close()`してから例外を再送出する(D-006で確立した単一ストリームのリーク防止パターンを2ストリームへ拡張する)。
+
+### 理由（検討した代替案）
+- **単一`sd.Stream`のまま設定を調整する案(例: WASAPI排他モード指定等)は不採用**: 異なる物理・仮想デバイスを1本のフルデュプレックスストリームで結合すること自体がPortAudio/WASAPIの一般的な制約であり、設定の調整では根本的に解決しない可能性が高い。実際に多くのsounddeviceベースの「仮想オーディオケーブル」アプリケーションが、入出力デバイスが異なる場合は2本の独立ストリーム+バッファという構成を採用しており、確立された標準的な解決策である。
+- **バッファをブロッキングキュー(`queue.Queue.put`のブロッキング)にする案は不採用**: オーディオコールバックスレッド内でブロッキング待機すると、PortAudioのリアルタイム制約(コールバックは短時間で返る必要がある)に違反し、別種のグリッチ・アンダーラン・場合によってはストリーム自体のエラーを招く。非ブロッキングかつ満杯時は最も古いフレームを破棄する設計とする。
+
+### 影響
+- `app/soloclarity/audio/engine.py`の実装が変更される。既存の`tests/test_engine.py`(単一`sd.Stream`のフェイクを前提にしたテスト)は新しいアーキテクチャに合わせて書き直しが必要。
+- このLinux環境では実デバイスでの動作確認はできないため、新しいリングバッファのロジック(順序保持、満杯時の破棄、空時の無音出力)は合成コールバック呼び出しによるユニットテストで検証する。実際にWindows実機でSoloCast→CABLE Inputの組み合わせが起動できるかは、ユーザーによる再検証が必要。
+- 本Issueは実機フィードバックによって発見された初めての具体的な不具合であり、Windows実機検証の重要性を裏付けている。今後同種の「異なる入出力デバイスの組み合わせ」に起因する問題がないか、`app/WINDOWS_VERIFICATION_CHECKLIST.md`に確認項目として明記する。
