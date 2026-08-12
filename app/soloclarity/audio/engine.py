@@ -18,6 +18,8 @@ from soloclarity.dsp.meter import LevelMeter
 
 # (in_rms_dbfs, in_peak_dbfs, out_rms_dbfs, out_peak_dbfs)
 MeterCallback = Callable[[float, float, float, float], None]
+# PortAudioのコールバックスレッドで発生したエラーメッセージを1つ受け取る。
+ErrorCallback = Callable[[str], None]
 
 
 class AudioEngine:
@@ -29,11 +31,13 @@ class AudioEngine:
         input_device: Optional[int] = None,
         output_device: Optional[int] = None,
         on_meter_update: Optional[MeterCallback] = None,
+        on_error: Optional[ErrorCallback] = None,
     ):
         self.chain = chain
         self.input_device = input_device
         self.output_device = output_device
         self.on_meter_update = on_meter_update
+        self.on_error = on_error
         self.bypass = False
         self._input_meter = LevelMeter()
         self._output_meter = LevelMeter()
@@ -50,7 +54,16 @@ class AudioEngine:
         if self.bypass:
             processed = frame
         else:
-            processed, _speech_prob = self.chain.process(frame)
+            try:
+                processed, _speech_prob = self.chain.process(frame)
+            except Exception as exc:
+                # チェーン内部の異常(不正なadvanced_overrides由来の異常値等)で
+                # コールバックスレッドが例外で落ちると音声処理が静かに止まって
+                # しまう。バイパス(無加工の入力をそのまま出力)にフォールバックし、
+                # GUI側へエラーを伝える。
+                processed = frame
+                if self.on_error is not None:
+                    self.on_error(str(exc))
 
         out_rms, out_peak = self._output_meter.update(processed)
         if self.on_meter_update is not None:

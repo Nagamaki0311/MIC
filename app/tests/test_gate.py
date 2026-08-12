@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
+from soloclarity import presets
 from soloclarity.dsp.gate import SpeechProbabilityGate
 
 
@@ -62,3 +64,45 @@ def test_release_time_roughly_matches_configured_ms():
     short = frames_to_close(120.0)
     long = frames_to_close(300.0)
     assert long > short
+
+
+class TestGateAgainstNoiseStagePresets:
+    """明瞭度ではなく実際のノイズ除去段階(弱/標準/強)のgate_threshold/gate_release_msを
+    使い、語尾・小さい声を不必要に削っていないかをattack/releaseの実測値で確認する。
+    """
+
+    @pytest.mark.parametrize("level", presets.NOISE_LEVELS)
+    def test_soft_but_sustained_speech_opens_within_a_few_frames(self, level):
+        """立ち上がりが遅い小さい声(発話確率が閾値をわずかに超える程度)を想定し、
+        ゲートが不必要に頭を削らない(すぐ開く)ことを確認する。"""
+        stage = presets.NOISE_STAGES[level]
+        gate = SpeechProbabilityGate(threshold=stage.gate_threshold, release_ms=stage.gate_release_ms)
+        frame = np.ones(480, dtype=np.float32) * 0.3
+        speech_prob = min(stage.gate_threshold + 0.05, 1.0)
+
+        opened_at = None
+        out = frame
+        for i in range(50):
+            out = gate.apply(frame, speech_prob)
+            if opened_at is None and np.max(np.abs(out)) > 0.95 * np.max(np.abs(frame)):
+                opened_at = i
+
+        assert opened_at is not None, f"{level}: gate never fully opened for sustained soft speech"
+        # attack_ms=5ms(0.5フレーム)は十分小さいため、数フレーム以内に開くはず。
+        assert opened_at <= 5, f"{level}: gate took {opened_at} frames to open (word onset would be clipped)"
+
+    @pytest.mark.parametrize("level", presets.NOISE_LEVELS)
+    def test_word_tail_fades_gradually_instead_of_cutting_abruptly(self, level):
+        """語尾で発話確率が閾値を割った直後の1フレームで、いきなり無音にならないこと
+        (release_msに応じて滑らかに減衰する)。"""
+        stage = presets.NOISE_STAGES[level]
+        gate = SpeechProbabilityGate(threshold=stage.gate_threshold, release_ms=stage.gate_release_ms)
+        frame = np.ones(480, dtype=np.float32) * 0.3
+        for _ in range(30):
+            gate.apply(frame, speech_prob=min(stage.gate_threshold + 0.3, 1.0))
+
+        out = gate.apply(frame, speech_prob=0.0)
+        assert np.max(np.abs(out)) > 0.01, (
+            f"{level}: gate cuts to near-silence within a single 10ms frame after the tail "
+            "of a word (release_ms is not being honored)"
+        )

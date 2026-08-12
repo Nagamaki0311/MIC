@@ -38,6 +38,3 @@ class SpeechProbabilityGate:
         coeff = self._attack_coeff if target > self._gain else self._release_coeff
         self._gain = target + (self._gain - target) * coeff
         return frame * self._gain
-
-    def reset(self) -> None:
-        self._gain = 0.0

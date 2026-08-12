@@ -17,7 +17,7 @@
 |----|--------|--------|------|------------------|------|
 | T-001 | HyperX SoloCast向け軽量ボイスプロセッサの開発 | 高 | 完了 | claude | Reviewer再検証で修正2件（High/Low）とも解消(CONFIRMED)、回帰なし、自動テスト26件pass。Windows実機・Discordでの動作確認はこのLinux環境では実施不可能なため未実施、WINDOWS_VERIFICATION_CHECKLIST.mdに沿ったユーザー側での最終確認が別途必要（D-001〜D-003参照） |
 | T-002 | GitHub Actionsによるexeビルドの自動化 | 中 | 完了 | claude | このLinux環境ではWindows向けexeをビルドできないため、windows-latestランナー上でpytest実行→PyInstallerビルド→Artifact公開を行うワークフローを追加（D-004参照） |
-| T-003 | 最終総点検・完成化（性能・音質・機能・UI/UX・安定性・敵対的検証） | 高 | 実装中 | claude | Manager調査で4件の具体的な改善点（config非アトミック保存/型未検証、コールバック内例外未捕捉、エラー表示の混在、Windows DPI未対応）を特定しDeveloperへ委任。詳細はdocs/progress.md参照 |
+| T-003 | 最終総点検・完成化（性能・音質・機能・UI/UX・安定性・敵対的検証） | 高 | レビュー中 | claude | Developer実装完了。確定5件のバグ（config非アトミック保存/型未検証、コールバック内例外未捕捉、エラー表示混在、Windows DPI未対応）を修正、ソークテスト（10万フレーム、RSS成長率1.007倍・処理時間比率1.002倍）・高頻度パラメータ切り替え・音質（ゲート/コンプレッサー/リミッター）・corrupted config・デバイス0件等を追加検証。pytest 66 passed、pyflakes警告0件。詳細はdocs/decisions.md D-005・docs/progress.md参照 |
 
 ## バックログ（未着手・優先度未確定）
 

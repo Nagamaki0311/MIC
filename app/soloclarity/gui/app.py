@@ -6,12 +6,13 @@
 
 from __future__ import annotations
 
+import platform
 import threading
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, ttk
 from typing import Optional
 
-from soloclarity import presets
+from soloclarity import __version__, presets
 from soloclarity.audio import devices as device_lib
 from soloclarity.audio.engine import AudioEngine, play_preview, record_and_process_preview
 from soloclarity.config import AppConfig
@@ -19,7 +20,6 @@ from soloclarity.dsp.chain import VoiceChain
 from soloclarity.gui.meter_widget import MeterWidget
 
 TEST_PREVIEW_SECONDS = 3.0
-METER_UPDATE_INTERVAL_MS = 100
 
 # 詳細設定スライダーの定義: (キー, ラベル, 最小, 最大, 刻み)
 ADVANCED_SLIDER_SPECS: tuple[tuple[str, str, float, float, float], ...] = (
@@ -44,11 +44,17 @@ ADVANCED_SLIDER_SPECS: tuple[tuple[str, str, float, float, float], ...] = (
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("SoloClarity")
+        self.title(f"SoloClarity v{__version__}")
         self.resizable(False, False)
 
         self.app_config = AppConfig.load()
-        self.chain = VoiceChain(self.app_config.preset)
+        try:
+            self.chain = VoiceChain(self.app_config.preset)
+        except Exception as exc:
+            # RNNoiseライブラリが見つからない等、DSPチェーンの初期化自体に失敗した場合。
+            # ウィンドウを破棄した上で、main()側でmessageboxとして分かりやすく表示する。
+            self.destroy()
+            raise RuntimeError(f"音声処理エンジンの初期化に失敗しました: {exc}") from exc
         self.engine: Optional[AudioEngine] = None
 
         self._input_devices = device_lib.list_input_devices()
@@ -149,8 +155,18 @@ class App(tk.Tk):
         self.output_meter = MeterWidget(meter_frame)
         self.output_meter.grid(row=1, column=1)
 
+        status_frame = ttk.Frame(self)
+        status_frame.grid(row=3, column=0, sticky="ew", **pad)
+        ttk.Label(status_frame, text="状態:").grid(row=0, column=0, sticky="w")
+        # ストリーム全体の状態・エラーはここに表示する(テスト再生ボタン専用の
+        # test_status_varとは責務を分ける)。
+        self.engine_status_var = tk.StringVar(value="停止中")
+        ttk.Label(status_frame, textvariable=self.engine_status_var).grid(
+            row=0, column=1, sticky="w"
+        )
+
         test_frame = ttk.Frame(self)
-        test_frame.grid(row=3, column=0, sticky="ew", **pad)
+        test_frame.grid(row=4, column=0, sticky="ew", **pad)
         self.test_button = ttk.Button(
             test_frame,
             text=f"テスト再生({int(TEST_PREVIEW_SECONDS)}秒録音→再生)",
@@ -165,7 +181,7 @@ class App(tk.Tk):
     def _build_advanced_panel(self) -> None:
         self._advanced_visible = False
         toggle_frame = ttk.Frame(self)
-        toggle_frame.grid(row=4, column=0, sticky="ew", padx=8, pady=(4, 0))
+        toggle_frame.grid(row=5, column=0, sticky="ew", padx=8, pady=(4, 0))
         self._advanced_toggle_button = ttk.Button(
             toggle_frame, text="詳細設定を開く", command=self._toggle_advanced
         )
@@ -345,7 +361,7 @@ class App(tk.Tk):
     def _toggle_advanced(self) -> None:
         self._advanced_visible = not self._advanced_visible
         if self._advanced_visible:
-            self._advanced_frame.grid(row=5, column=0, sticky="ew", padx=8, pady=4)
+            self._advanced_frame.grid(row=6, column=0, sticky="ew", padx=8, pady=4)
             self._advanced_toggle_button.configure(text="詳細設定を閉じる")
         else:
             self._advanced_frame.grid_remove()
@@ -387,6 +403,7 @@ class App(tk.Tk):
             input_device=input_device,
             output_device=output_device,
             on_meter_update=self._on_meter_update,
+            on_error=self._on_engine_error,
         )
         engine.bypass = not self.processing_enabled_var.get()
         try:
@@ -394,20 +411,31 @@ class App(tk.Tk):
         except Exception as exc:
             # デバイス未接続・権限エラー等でここに到達し得る。アプリ全体を落とさず、
             # ユーザーがデバイスを選び直せるようにステータス表示のみ行う。
-            self.test_status_var.set(f"ストリーム開始エラー: {exc}")
+            self.engine_status_var.set(f"ストリーム開始エラー: {exc}")
             return
         self.engine = engine
+        self.engine_status_var.set("動作中")
 
     def _stop_engine(self) -> None:
         if self.engine is not None:
             self.engine.stop()
             self.engine = None
+            self.engine_status_var.set("停止中")
 
     def _on_meter_update(self, in_rms, in_peak, out_rms, out_peak) -> None:
         # sounddeviceのコールバックスレッドから呼ばれるため、Tkinter更新はafterで
         # メインスレッドに戻す。
         self.after(0, lambda: self.input_meter.update_levels(in_rms, in_peak))
         self.after(0, lambda: self.output_meter.update_levels(out_rms, out_peak))
+
+    def _on_engine_error(self, message: str) -> None:
+        # AudioEngineのコールバックスレッドから呼ばれるため、Tkinter更新はafterで
+        # メインスレッドに戻す。処理は自動的にバイパスへフォールバック済みなので、
+        # ここでは状態表示のみ行う(音は止めない)。
+        self.after(
+            0,
+            lambda: self.engine_status_var.set(f"処理エラー(未加工の音声で継続中): {message}"),
+        )
 
     def _on_close(self) -> None:
         self._save_config()
@@ -416,8 +444,45 @@ class App(tk.Tk):
         self.destroy()
 
 
+def _set_windows_dpi_awareness() -> None:
+    """Windowsの高DPI(125%/150%等)環境で文字・要素がぼやけるのを防ぐ。
+
+    Tkinterは既定では高DPIを意識しないため、起動時にプロセスのDPI Awarenessを
+    明示的に設定する。古いWindowsや権限の問題等でこの呼び出し自体が失敗しても、
+    アプリの起動は継続する(表示が多少ぼやける程度で機能自体に影響しないため)。
+    Linux(この開発・テスト環境含む)では`platform.system() != "Windows"`の時点で
+    何もせず戻るため、このモジュールのテストはLinux上でも壊れない。
+    """
+    if platform.system() != "Windows":
+        return
+    try:
+        import ctypes
+
+        # PROCESS_SYSTEM_DPI_AWARE(=1)。Shcore.dllはWindows 8.1以降で利用可能。
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
+
+
+def _show_startup_error(exc: Exception) -> None:
+    root = tk.Tk()
+    root.withdraw()
+    messagebox.showerror(
+        "SoloClarity 起動エラー",
+        "SoloClarityの起動に失敗しました。\n\n"
+        f"{exc}\n\n"
+        "RNNoiseライブラリ(rnnoise.dll)が正しい場所に配置されているか確認してください。",
+    )
+    root.destroy()
+
+
 def main() -> None:
-    app = App()
+    _set_windows_dpi_awareness()
+    try:
+        app = App()
+    except Exception as exc:
+        _show_startup_error(exc)
+        return
     app._start_engine()
     app.mainloop()
 

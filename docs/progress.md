@@ -19,6 +19,45 @@
 
 ---
 
+## 2026-08-12 T-003 最終総点検・完成化(敵対的検証による堅牢化)
+
+### 実施内容
+- `app/soloclarity/`全体を通読した上で、Managerの事前調査で特定済みの5件の具体的バグを修正した(詳細はdocs/decisions.md D-005参照)。
+  1. `config.py`の`AppConfig.save()`を`tempfile.mkstemp()`+`os.replace()`によるアトミック書き込みへ変更。
+  2. `AppConfig.load()`に`isinstance(data, dict)`チェックと、フィールドごとの型/値バリデータ(`_FIELD_VALIDATORS`)を追加。非dict JSON・型違い値・不明なプリセット名等をすべてデフォルトへフォールバックするようにした。
+  3. `AudioEngine._callback`内の`chain.process()`をtry/exceptで保護し、失敗時はバイパス(未加工の入力をそのまま出力)にフォールバック。`on_error`コールバックを新設し、GUI側へエラーを伝える導線を追加。
+  4. `app.py`にストリーム全体の状態・エラー専用の`engine_status_var`を新設し、テスト再生ボタン専用の`test_status_var`と責務を分離。
+  5. `app.py`に`_set_windows_dpi_awareness()`を追加し、`main()`冒頭でWindows限定で`SetProcessDpiAwareness`を試みるようにした(Linux上では即returnし、失敗しても起動継続)。
+- 追加確認項目を実装・実行した。
+  - RNNoiseライブラリ不在時、`App.__init__`でのVoiceChain初期化失敗を`RuntimeError`として明確化し、`main()`側で`tkinter.messagebox`によるエラーダイアログ表示に置き換えた。
+  - デバイス0件時の挙動を`sd.query_devices`モンキーパッチで確認(`tests/test_devices.py`、`tests/test_app_gui.py::TestZeroDevices`)。
+  - `app/tests/soak_chain.py`(長時間ソークテスト、10万フレーム)を新規作成・実行。
+  - `tests/test_chain.py`にプリセット・詳細設定の高頻度ランダム切り替え(3,000回)テストを追加し、RNNoiseネイティブ状態が再作成されない(リークしない)ことを確認。
+  - `tests/test_gate.py`に実際の3段階ノイズ除去プリセットのgate_threshold/gate_release_msを使った語尾・小さい声の欠落確認テストを追加。
+  - `tests/test_chain.py`にコンプレッサーの急激な音量変化・リミッターの発動頻度を確認するテストを追加。
+  - `tests/test_config.py`(corrupted config.jsonの9パターン)、`tests/test_engine.py`(コールバック内エラー処理5パターン)、`tests/test_app_gui.py`(GUI構造検証7パターン、xvfb環境)を新規作成。
+  - `tests/conftest.py`に`gui_display`フィクスチャを追加(DISPLAY未設定時、Linux上にXvfbがあれば自動起動、無ければGUIテストをskip。新規pip依存は追加せず既存システムバイナリのみで完結)。
+  - 設計整理: `app/soloclarity/`全体をgrepで棚卸しし、未使用の`METER_UPDATE_INTERVAL_MS`定数(app.py)と`SpeechProbabilityGate.reset()`メソッド(gate.py)を削除。requirements.txt/requirements-dev.txtの依存が実際のimportと一致することを再確認(未使用依存なし、新規追加なし)。
+  - `app/soloclarity/__init__.py`の`__version__`をウィンドウタイトル(`SoloClarity v{__version__}`)へ表示。バージョン番号自体は変更していない。
+  - `app/WINDOWS_VERIFICATION_CHECKLIST.md`に、この環境で検証不可能な項目(高DPI表示崩れ、デバイス抜き差し、Discordとの起動順序、スリープ復帰、Windows起動直後の動作、長期間の実運用)を10〜15節として追記。
+
+### 結果(実際に実行したテスト・ベンチマークの数値のみ記録。Windows/Discordでの動作確認は一切行っていない)
+- `pytest tests/`(このLinux環境): **66 passed, 0 failed**(既存26件 + 新規40件。`bench_chain.py`/`soak_chain.py`はファイル名が`test_*.py`パターンに一致しないため既定収集対象外、既存の運用どおり個別実行)。
+- `pyflakes soloclarity tests`: 警告0件。
+- `python -m tests.bench_chain`(1000フレーム、全修正後の再測定): 平均**0.6991ms/フレーム**(10ms予算の**7.0%**、閾値30%を十分に下回る)。
+- `python -m tests.soak_chain`(10万フレーム=1000秒相当、音声らしいsin波+ノイズ混合/無音/ノイズのみ区間を3秒周期で混在): 実行時間約71秒。RSSはウォームアップ後(10%地点)54,784KB→最終55,168KBで**成長率1.007倍**(閾値1.3倍を大きく下回る、無制限な増加なし)。フレーム処理時間は先頭1万フレーム平均0.6945ms→末尾1万フレーム平均0.6958msで**比率1.002倍**(閾値1.5倍を大きく下回る、時間経過での劣化なし)。
+- `tests/test_config.py`: 構文エラーJSON・非dict JSON(null/配列/文字列/数値/真偽値)・フィールド欠落・型違い(processing_enabled/input_device_name)・不明プリセット名・型違いadvanced_overrides・非数値override値・未知フィールドの計9パターンすべてでクラッシュせずデフォルト相当にフォールバックすることを確認。アトミック書き込み(json.dump失敗を模した書き込み中断)で既存config.jsonが破損しないことも確認。
+- `tests/test_engine.py`: `AudioEngine._callback`を直接呼び出し、chain.process()の例外がバイパスへフォールバックし出力が止まらないこと、on_errorコールバックが呼ばれること、1フレームの一時的な失敗から次フレームで正常復帰すること、on_error未指定でも例外を送出しないことを確認。
+- `tests/test_app_gui.py`(xvfb環境、`tests/conftest.py`の`gui_display`フィクスチャが自動でXvfbを起動): ウィンドウタイトルにバージョンが表示されること、`engine_status_var`と`test_status_var`が独立していること(エラー発生時に前者のみ変化)、デバイス0件でもクラッシュしないこと、RNNoiseライブラリ不在時に分かりやすい`RuntimeError`になること、DPI awareness関数がLinux上で例外を出さないことを確認。なお、この開発環境自体が実際にオーディオデバイス0件・RNNoise共有ライブラリ未配置(vendor/)であるため、これらのエラー経路は模擬条件だけでなく実際の環境条件でも発火することを確認できた。
+- `tests/test_gate.py`: 実際の3段階ノイズ除去プリセット(弱/標準/強)それぞれで、閾値をわずかに超える小さい声が5フレーム(50ms)以内に開くこと(頭の欠落なし)、release後の1フレームで無音まで落ちないこと(語尾の唐突な切れなし)を確認。
+- `tests/test_chain.py`: 高頻度パラメータ切り替え(3,000回)で例外なし・RNNoiseネイティブ状態のオブジェクトIDが不変であることを確認。コンプレッサーがフレーム間dB変化量を悪化させないこと、通常音量(peak -10dBFS)ではリミッターの減衰がほぼ無い(出力/入力RMS比>0.98)ことを確認。
+
+### 次回開始位置
+- ReviewerによるT-003のレビュー(敵対的検証、REVIEW.md準拠)。承認後、Manager判断でT-003を完了とする。
+- Windows実機での最終確認は引き続きユーザー側の作業として残っている(`app/WINDOWS_VERIFICATION_CHECKLIST.md`、10〜15節を含め全項目未実施)。
+
+---
+
 ## 2026-08-12 T-002 GitHub Actionsによるexeビルドの自動化
 
 ### 実施内容
