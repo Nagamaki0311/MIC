@@ -48,7 +48,12 @@ def _build_compressor_board(compressor: presets.CompressorParams) -> pedalboard.
 def _build_limiter_board() -> pedalboard.Pedalboard:
     # 全プリセット共通の安全弁。ceilingは-1.0dBFSでDiscord側のクリップを防ぐ(仕様書参照)。
     return pedalboard.Pedalboard(
-        [pedalboard.Limiter(threshold_db=presets.LIMITER_CEILING_DBFS, release_ms=100.0)]
+        [
+            pedalboard.Limiter(
+                threshold_db=presets.LIMITER_CEILING_DBFS,
+                release_ms=presets.LIMITER_RELEASE_MS,
+            )
+        ]
     )
 
 

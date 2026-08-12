@@ -19,6 +19,22 @@
 
 ---
 
+## 2026-08-12 T-001 Reviewer差し戻し対応（advanced_overrides未反映バグの修正）
+
+### 実施内容
+- Reviewer指摘(High, CONFIRMED)への対応: `app/soloclarity/gui/app.py`の`_on_advanced_slider_changed`からchainへの反映ロジックを`_apply_slider_values_to_chain()`へ切り出し、`_apply_advanced_overrides`(config復元経路)が`_updating_from_code`ガードに関わらずchainへ反映できるようにした（D-003参照）。
+- Reviewer指摘(Low, CONFIRMED)への対応: `app/soloclarity/dsp/chain.py`の`_build_limiter_board()`に直書きされていた`release_ms=100.0`を、`app/soloclarity/presets.py`に新規追加した`LIMITER_RELEASE_MS`定数の参照に置き換えた。
+- docs/decisions.mdにD-003を追記。
+
+### 結果（実際に実行した検証）
+- xvfb環境(`xvfb-run`)で以下を実機検証した: `agc_target_dbfs=-18.5`（プリセットデフォルト`-17.0`とは異なる値）を含む`advanced_overrides`を持つ`config.json`を用意し、`App()`を起動して復元させた結果、スライダー表示値(`-18.5`)だけでなく`app.chain.agc.target_linear`が保存値から計算される期待値(`10**(-18.5/20) = 0.11885022274370183`)と完全一致することを確認した（修正前は`_on_advanced_slider_changed`がガードでreturnするため、chain側はプリセットデフォルト由来の値のままになっていたはずの箇所）。
+- `pytest tests/`（この環境）: **26 passed, 0 failed**（新規リグレッションなし）。
+
+### 次回開始位置
+- Reviewerへ再レビューを依頼する。承認されればT-001は完了(AGENTS.mdのレビュー基準4項目を満たすかReviewer側で最終確認)。
+
+---
+
 ## 2026-08-12 T-001 SoloClarity実装（Developer作業完了、レビュー待ち）
 
 ### 実施内容
