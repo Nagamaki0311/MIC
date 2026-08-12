@@ -124,13 +124,16 @@ class TestVoiceChainInitFailureIsReportedClearly:
 
 
 class TestWindowsDpiAwareness:
-    def test_no_op_and_does_not_raise_on_linux(self):
+    def test_does_not_raise_on_any_platform(self):
+        """Windows以外ではno-op、Windows(CI含む)では実際にDPI awarenessを
+        試みるが、いずれの場合も例外を送出しないこと(D-005参照)。
+
+        CI(.github/workflows/build-windows.yml)がwindows-latest上で
+        このテストを実行するため、`platform.system()`の値をどちらか一方に
+        決め打ちしないこと(過去にLinux決め打ちの表明でWindows CI上で
+        失敗した実績があるため)。"""
         from soloclarity.gui.app import _set_windows_dpi_awareness
 
-        # このテスト自体がLinux上で実行される前提(壊れたら失敗する最小限の確認)。
-        import platform
-
-        assert platform.system() != "Windows"
         _set_windows_dpi_awareness()  # 例外を送出しないこと
 
 
