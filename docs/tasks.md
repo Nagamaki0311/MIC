@@ -16,6 +16,7 @@
 | ID | タスク | 優先度 | 状態 | 担当エージェント | 備考 |
 |----|--------|--------|------|------------------|------|
 | T-001 | HyperX SoloCast向け軽量ボイスプロセッサの開発 | 高 | 完了 | claude | Reviewer再検証で修正2件（High/Low）とも解消(CONFIRMED)、回帰なし、自動テスト26件pass。Windows実機・Discordでの動作確認はこのLinux環境では実施不可能なため未実施、WINDOWS_VERIFICATION_CHECKLIST.mdに沿ったユーザー側での最終確認が別途必要（D-001〜D-003参照） |
+| T-002 | GitHub Actionsによるexeビルドの自動化 | 中 | 完了 | claude | このLinux環境ではWindows向けexeをビルドできないため、windows-latestランナー上でpytest実行→PyInstallerビルド→Artifact公開を行うワークフローを追加（D-004参照） |
 
 ## バックログ（未着手・優先度未確定）
 

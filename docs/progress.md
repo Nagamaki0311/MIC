@@ -19,6 +19,23 @@
 
 ---
 
+## 2026-08-12 T-002 GitHub Actionsによるexeビルドの自動化
+
+### 実施内容
+- ユーザーから「実行ファイルは出せるか」との質問に対し、この開発環境（Linux、Wine等も未導入）ではPyInstallerのクロスコンパイル不可により直接exeを渡せない旨を説明し、代替案としてGitHub Actionsでのビルド提案を提示、了承を得た。
+- `.github/workflows/build-windows.yml`を新規作成（D-004参照）。`windows-latest`ランナーでpytest実行→既存の`app/build/build_windows.bat`によるビルド→`app/dist/SoloClarity.exe`をArtifact公開する構成。トリガーはpush(main, app/**)・pull_request(同条件)・workflow_dispatch。
+- `docs/tasks.md`にT-002を追加（状態=完了、ワークフロー追加自体は完了。実際のCI実行結果の確認はこの後のPRで行う）。
+
+### 結果
+- ワークフローYAMLの構文はPythonのyamlモジュールでパース可能なことを確認済み（`on:`キーがPyYAMLの仕様上boolean Trueとして読み込まれるのはYAML 1.1の既知の挙動であり、GitHub Actions側のパーサーには影響しない）。
+- `build_windows.bat`の内容を読み、CI環境（非対話、`--noconfirm`済み、errorlevelチェックあり）で問題なく動作する構成であることを確認した。
+- 実際のCI実行結果（Windows上でのpytest・ビルド成功可否）は、本エントリ作成時点では未確認。次のPRでActionsの実行結果を確認する。
+
+### 次回開始位置
+- PRを作成し、Actionsの実行結果（pytest・PyInstallerビルド・Artifact生成）を確認する。失敗した場合は原因を調査し修正する。
+
+---
+
 ## 2026-08-12 T-001 Reviewer再検証・完了
 
 ### 実施内容

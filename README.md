@@ -28,9 +28,15 @@ python -m tests.bench_chain            # 1フレーム(10ms)あたりの処理�
 
 ### エンドユーザー向け（Windows実機）
 
-1. `app/build/build_windows.bat` をWindows上で実行し、`SoloClarity.exe` をビルドする（このLinux開発環境ではビルドできないため、必ずユーザーのWindows環境で実行する）。
-2. [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) を別途インストールする（本リポジトリには同梱しない）。
-3. `SoloClarity.exe` を起動し、マイク・出力先（CABLE Input）・プリセットを選ぶ。
+`SoloClarity.exe` の入手方法は2通りある。
+
+- **GitHub Actionsから入手（推奨、ビルド不要）**: このリポジトリの Actions タブ → `Build Windows executable` ワークフローの最新の成功実行 → Artifacts欄の `SoloClarity-windows-exe` をダウンロードする。`main`への変更やPRのたびに`windows-latest`ランナー上で自動ビルドされる（`.github/workflows/build-windows.yml`、D-004参照）。
+- **自分でビルドする**: `app/build/build_windows.bat` をWindows上で実行し、`SoloClarity.exe` をビルドする（このLinux開発環境ではビルドできないため、必ずユーザーのWindows環境で実行する）。
+
+入手後の手順:
+
+1. [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) を別途インストールする（本リポジトリには同梱しない）。
+2. `SoloClarity.exe` を起動し、マイク・出力先（CABLE Input）・プリセットを選ぶ。
 
 詳しい手順は `app/はじめにお読みください.txt`（日本語マニュアル）を参照。Windows実機での動作確認項目は `app/WINDOWS_VERIFICATION_CHECKLIST.md` にまとめている（このLinux開発環境では自動テスト・ベンチマークまでしか検証できていないため、実機確認が必須）。
 
