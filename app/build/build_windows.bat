@@ -27,6 +27,11 @@ if not exist "soloclarity\dsp\vendor" mkdir "soloclarity\dsp\vendor"
 python -c "import importlib.metadata as m, shutil; files = m.files('pyrnnoise'); dll = [f for f in files if f.name == 'rnnoise.dll']; assert dll, 'rnnoise.dll not found in pyrnnoise wheel'; shutil.copy(str(dll[0].locate()), 'soloclarity/dsp/vendor/rnnoise.dll'); print('copied:', dll[0].locate())"
 if errorlevel 1 goto :error
 
+REM PyInstallerは--add-binaryの相対パスを、cwdではなく--specpathのディレクトリ
+REM 基準で解決するため(specpathをbuild\outputに逃がしている都合上)、
+REM ここで絶対パスに展開してから渡す。
+set "RNNOISE_DLL=%CD%\soloclarity\dsp\vendor\rnnoise.dll"
+
 echo === [4/5] PyInstallerでexeをビルド ===
 REM --exclude-module: pyrnnoise本体(audiolab/av/matplotlib/click/tqdmを道連れにする)を
 REM 明示的に除外し、軽量な配布バイナリを保つ(D-001参照)。
@@ -40,7 +45,7 @@ python -m PyInstaller ^
     --distpath dist ^
     --workpath build\output ^
     --specpath build\output ^
-    --add-binary "soloclarity\dsp\vendor\rnnoise.dll;soloclarity/dsp/vendor" ^
+    --add-binary "%RNNOISE_DLL%;soloclarity/dsp/vendor" ^
     --exclude-module pyrnnoise ^
     --exclude-module av ^
     --exclude-module audiolab ^

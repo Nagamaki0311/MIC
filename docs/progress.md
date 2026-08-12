@@ -34,6 +34,11 @@
 ### 次回開始位置
 - PRを作成し、Actionsの実行結果（pytest・PyInstallerビルド・Artifact生成）を確認する。失敗した場合は原因を調査し修正する。
 
+### 追記: 初回CI実行の失敗と修正
+- PR #3のCI（windows-latest、run 31609477972）で`pytest tests/`は26 passedだったが、PyInstallerのビルドが`rnnoise.dllが見つからない`エラーで失敗した。`--add-binary`の相対パスが`--specpath`（`build\output`）基準で解決される仕様のためだった。`app/build/build_windows.bat`で絶対パスに展開するよう修正した（D-004追記参照）。
+- このLinux環境ではPyInstallerのビルドフェーズ自体を一度も実行できていなかったため、CIをWindows上で実際に走らせて初めて発見できた問題であり、D-004でCIを追加した狙い（Windows固有の問題の可視化）がさっそく機能した形になる。
+- 修正をpushし、CIの再実行結果を確認する（次回開始位置）。
+
 ---
 
 ## 2026-08-12 T-001 Reviewer再検証・完了
