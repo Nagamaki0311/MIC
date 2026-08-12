@@ -12,7 +12,29 @@ HyperX SoloCastを入力デバイスとする軽量ボイスプロセッサ。�
 
 ## 使い方
 
-アプリ本体の使い方（動作環境・インストール手順・操作方法）は、実装が固まった時点で本節に追記する。現時点ではdocs/tasks.mdの進行中タスクを参照。
+アプリ本体（SoloClarity）は `app/` 以下にPython 3実装がある。設計判断はdocs/decisions.md D-001・D-002を参照。
+
+### 開発環境（このリポジトリで完結する範囲）
+
+```
+cd app
+pip install -r requirements.txt        # sounddevice, pedalboard, numpy
+pip install -r requirements-dev.txt    # pytest, pyrnnoise(RNNoiseのテスト専用取得元)
+pytest tests/                          # DSPロジックの自動テスト（26件、実デバイス不要）
+python -m tests.bench_chain            # 1フレーム(10ms)あたりの処理時間ベンチマーク
+```
+
+`pyrnnoise`はテスト専用の開発依存であり、アプリ本体コード（`app/soloclarity/`以下）からは一切importしない（`app/soloclarity/dsp/rnnoise.py`に自前のctypesラッパーを実装している）。
+
+### エンドユーザー向け（Windows実機）
+
+1. `app/build/build_windows.bat` をWindows上で実行し、`SoloClarity.exe` をビルドする（このLinux開発環境ではビルドできないため、必ずユーザーのWindows環境で実行する）。
+2. [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) を別途インストールする（本リポジトリには同梱しない）。
+3. `SoloClarity.exe` を起動し、マイク・出力先（CABLE Input）・プリセットを選ぶ。
+
+詳しい手順は `app/はじめにお読みください.txt`（日本語マニュアル）を参照。Windows実機での動作確認項目は `app/WINDOWS_VERIFICATION_CHECKLIST.md` にまとめている（このLinux開発環境では自動テスト・ベンチマークまでしか検証できていないため、実機確認が必須）。
+
+ライセンス（GPLv3）・使用OSSの著作権表示は `app/LICENSE` ・ `app/THIRD-PARTY-NOTICES.txt` を参照。
 
 ## 構成
 

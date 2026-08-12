@@ -1,0 +1,78 @@
+SoloClarity 第三者ソフトウェア告知 (THIRD-PARTY NOTICES)
+=========================================================
+
+SoloClarity (本アプリ) はGNU General Public License v3.0 (GPLv3) で配布されます
+(LICENSEファイル参照)。本アプリは以下の第三者ソフトウェアを利用しています。
+
+
+1. pedalboard
+-------------
+著作権者: Spotify AB (Peter Sobot <psobot@spotify.com>)
+ライセンス: GNU General Public License v3.0 (GPLv3)
+入手元: https://github.com/spotify/pedalboard
+用途: EQ(HighpassFilter/PeakFilter)・Compressor・Limiterの信号処理。
+備考: 本アプリがGPLv3で配布される直接の理由。ライセンス全文はLICENSEファイルを参照。
+
+
+2. RNNoise
+----------
+著作権者: Xiph.Org Foundation / Jean-Marc Valin ほか
+ライセンス: BSD 3-Clause License
+入手元: https://gitlab.xiph.org/xiph/rnnoise
+用途: ノイズ抑制(定常ノイズの除去)、発話確率(speech probability)の算出。
+      本アプリは`soloclarity/dsp/rnnoise.py`の自前ctypesラッパー経由で
+      コンパイル済み共有ライブラリ(Windows: rnnoise.dll)を呼び出します。
+
+
+3. pyrnnoise (rnnoise.py 低レベルAPIの参考実装)
+-----------------------------------------------
+著作権者: Zhendong Peng (pzd17@tsinghua.org.cn)
+ライセンス: Apache License 2.0
+入手元: https://github.com/pengzhendong/pyrnnoise
+用途: `soloclarity/dsp/rnnoise.py`は、pyrnnoiseの低レベルAPI実装
+      (`pyrnnoise/rnnoise.py`)と同等のctypes呼び出し規約を出典明記の上で
+      自前実装したものです。pyrnnoiseパッケージ本体(audiolab/av/matplotlib/
+      click/tqdm等に依存する高レベルAPI)はアプリ本体には一切組み込んでいません。
+      Windows配布用のrnnoise.dllは、ビルド時にpyrnnoiseのPyPIホイールから取得します。
+
+      Apache License 2.0全文: http://www.apache.org/licenses/LICENSE-2.0
+
+
+4. sounddevice (および内部で利用するPortAudio)
+-----------------------------------------------
+著作権者: Matthias Geier ほか
+ライセンス: MIT License
+入手元: https://github.com/spatialaudio/python-sounddevice/
+用途: WASAPI経由のマイク入力・仮想マイクへの出力(音声デバイスI/O)。
+
+PortAudio
+著作権者: Ross Bencina, Phil Burk ほか
+ライセンス: MIT-style License (PortAudio License)
+入手元: http://www.portaudio.com/
+用途: sounddeviceが内部で利用するクロスプラットフォーム音声I/Oライブラリ。
+
+
+5. NumPy
+--------
+著作権者: NumPy Developers (Travis E. Oliphant ほか)
+ライセンス: BSD 3-Clause License
+入手元: https://numpy.org / https://github.com/numpy/numpy
+用途: 音声フレームの数値配列処理全般。
+
+
+6. VB-Audio Virtual Cable (同梱していません)
+---------------------------------------------
+提供元: VB-Audio Software
+ライセンス: 独自の無償ライセンス(フリーウェア。再配布条件は提供元の規約に従う)
+入手元: https://vb-audio.com/Cable/
+用途: SoloClarityが処理した音声をDiscord等へ渡すための仮想マイクデバイス。
+備考: 本リポジトリにはVB-Audio Virtual Cableのバイナリを一切同梱していません。
+      利用にはユーザー自身が上記入手元から別途ダウンロード・インストールする
+      必要があります。
+
+
+7. Python標準ライブラリ (Tkinter等)
+-------------------------------------
+ライセンス: Python Software Foundation License
+入手元: https://www.python.org/
+用途: GUI(Tkinter)、設定ファイルの読み書き(json)等。

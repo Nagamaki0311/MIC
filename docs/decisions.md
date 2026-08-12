@@ -57,3 +57,56 @@
 - 実装（Developer）はこのアーキテクチャを前提に行う。DSPロジック（EQ/コンプレッサー/AGC/RNNoise連携/ゲート）は本セッション環境（Linux）でnumpy合成信号によるユニットテストと処理速度ベンチマークが可能。
 - 音声デバイスキャプチャ・VB-Cable経由の仮想マイク出力・実際のDiscordでの動作確認は、この環境では実施不可能。ユーザーのWindows環境での最終確認が必須であり、そのための確認手順書を成果物に含める。
 - 配布用exeのビルド（PyInstaller）もユーザーのWindows環境で1回実行してもらう必要がある。ビルドスクリプト・手順書を成果物に含める。
+
+---
+
+## D-002: T-001実装時に補った数値パラメータ・テスト設計判断
+
+- 日付: 2026-08-12
+- 状態: 採用
+
+### 背景
+- D-001で確定した仕様書（docs/tasks.md T-001指示）は、明瞭度・ノイズ除去・コンプレッサー・AGCのtarget/max_gainについては具体的な数値表を与えていたが、以下は「低速」「緩め」等の定性的な指定にとどまり、具体的な数値はDeveloper実装時の判断に委ねられていた。
+- また、AGC・発話確率ゲートの効果をpytestで実測する過程で、RNNoiseの発話確率が完全に定常な合成音（周期的なsin波の倍音合成）に対して数十フレーム後に大きく低下する（非音声と判定される）実挙動が確認され、フルチェーンを通したテスト設計にも判断が必要になった。
+
+### 決定
+1. **AGCの時定数**: `presets.AgcParams`の`attack_seconds=2.0`, `release_seconds=4.0`をデフォルト値とし、全プリセット共通で使用する（プリセット表はtarget/max_gainのみを指定するため）。RMSエンベロープを目標値に追従させる時定数であり、数秒オーダーの「低速」を意図した値。
+2. **AGCのゲイン更新凍結閾値**: 発話確率0.3未満で凍結する（`AutomaticGainControl.freeze_speech_prob_threshold`のデフォルト値）。
+3. **ゲートのattack**: 発話確率が閾値を上回った際にゲートが開く速さは全ノイズ除去段階で共通のattack_ms=5.0(SpeechProbabilityGateのデフォルト)とした。仕様書はrelease(閉じる速さ)のみを規定していたため。
+4. **共通Limiterのrelease_ms**: 100msとした(仕様書はceiling -1.0dBFSのみ規定)。
+5. **AGCとCompressor/Limiterの順序**: 仕様書の「Compressor → 自前AGC → Limiter」の順序どおりに実装（`app/soloclarity/dsp/chain.py`）。
+6. **テスト設計(test_chain.py)**: 明瞭度(EQ)のFFT検証は、HighpassFilter+PeakFilter部分のみを単独実行して検証する方式にした。Compressor/AGC/Limiterは全帯域に一様なスカラーゲインしかかけないため、フルチェーンを通しても2帯域間の相対関係(EQの効果そのもの)は変わらない一方、RNNoiseは周波数選択的に動作するため、フルチェーン経由だとRNNoiseの影響がEQ単体の効果に混ざってしまうため。
+7. **テスト設計(AGCのRMS上昇の検証)**: AGC単体(test_agc.py)では出力RMSがtarget_dbfsへ近づくことを厳密に数値検証する。フルチェーン(test_chain.py)では、上記の通りRNNoiseが完全に定常な合成音を「非音声」と徐々に判定してしまい、フレームごとの出力振幅が大きく揺らぐため、出力RMSそのものの単調な上昇を安定して検証できなかった。そのため、フルチェーン側ではAGCの内部ゲイン状態(`chain.agc._gain`)が量の小さい入力に対して増加方向に働くことを確認する設計にとどめた（実際の音声はRNNoiseにとって「非音声」化しないため、この制約は合成テスト信号特有の限界であり、実装のバグではない）。
+
+### 理由
+- 仕様書に明記されていない数値は、AGENTS.md判定ラダーに従い「要件を過不足なく満たす最小実装」として、一般的なボイスプロセッサのAGC/ゲート挙動（数秒オーダーの緩やかな追従、100ms程度のリミッターリリース）を参考に妥当な値を選んだ。
+- テスト設計上の制約(RNNoiseが完全に周期的な合成音を非音声と判定する)は、実装のバグではなくRNNoiseというモデルの実際の挙動である。これはむしろ「本物の音声ではノイズ扱いされない」というRNNoiseの正しい動作を裏付けている。
+
+### 影響
+- Reviewerはこれらの数値がAGENTS.md/D-001の要求範囲内(定性的な指定を満たす具体値)であることを確認する。将来ユーザーからのフィードバック(Windows実機確認)で時定数の調整が必要になった場合は、`app/soloclarity/presets.py`の`AgcParams`・`app/soloclarity/dsp/gate.py`・`app/soloclarity/dsp/chain.py`の該当箇所のみを変更すればよい(GUIの詳細設定パネルからはAGCのtarget/max_gainのみ調整可能。attack/release秒数はGUI非公開のプログラム定数)。
+
+---
+
+## D-003: `advanced_overrides`復元時にDSPチェーンへ反映されないバグの修正（Reviewer指摘対応）
+
+- 日付: 2026-08-12
+- 状態: 採用
+
+### 背景
+- Reviewerが`app/soloclarity/gui/app.py`をxvfb環境で実機検証し、`_restore_from_config`が`self._updating_from_code = True`をセットしたまま`_apply_advanced_overrides`を呼び、その中で各スライダーへ`.set(value)`した後に`_on_advanced_slider_changed(None)`を呼んでchainへ反映しようとしていたが、`_on_advanced_slider_changed`冒頭のガード`if self._updating_from_code: return`により即座にreturnし、chainへの反映が一度も実行されないことを確認した(CONFIRMED, High)。
+- 結果として、詳細設定を変更→保存→再起動すると、スライダーの表示は保存値どおりに復元されるが、実際の音声処理を担う`self.chain`側(EQ/コンプレッサー/AGC等)はプリセットデフォルトのまま動作し続けるという、表示と実処理が乖離するバグが発生していた。
+- 根本原因は「復元中の誤反応を防ぐガード(`_updating_from_code`)」と「詳細設定変更をchainへ適用する処理」が同一関数(`_on_advanced_slider_changed`)に同居しており、両者を分離できていなかったこと。
+
+### 決定
+- `_on_advanced_slider_changed`からchainへの反映ロジックを`_apply_slider_values_to_chain()`という別関数に切り出した。
+  - `_on_advanced_slider_changed`はガード判定後に`_apply_slider_values_to_chain()`を呼ぶだけのラッパーとして残す(ユーザーがスライダーを直接操作した際の経路)。
+  - `_apply_advanced_overrides`(config復元時の経路)は、`_updating_from_code`の値に関わらず`_apply_slider_values_to_chain()`を直接呼ぶ。
+- 併せてLow指摘として、`app/soloclarity/dsp/chain.py`の`_build_limiter_board()`に直書きされていた`release_ms=100.0`を`presets.LIMITER_RELEASE_MS`(`app/soloclarity/presets.py`に新規追加)へ移動した。presets.pyモジュールdocstringの「UIやDSPチェーンはこのモジュールの値のみを参照し、数値をコード中に埋め込まないこと」というルールに沿わせるため。
+
+### 理由
+- 判定ラダーの「バグは根本原因を直す」(AGENTS.md)に従い、症状(反映されない)ではなく、ガードが復元経路のchain反映まで無効化してしまっている構造上の原因を直した。ガード自体は「ユーザー操作イベント由来の誤反応防止」という別の役割を持つため、それを維持しつつchain反映ロジックだけを独立させる形にし、既存のイベントハンドラの責務を変えないようにした。
+
+### 影響
+- xvfb環境で`advanced_overrides`を含む`config.json`から`App`を復元し、`app.chain.agc.target_linear`が保存値(`agc_target_dbfs=-18.5`)から計算される期待値と一致することを実機検証した(プリセットデフォルトの`-17.0`とは異なる値であることを確認済み)。
+- `pytest tests/`は26 passedのまま(リグレッションなし)。
+- 今後、詳細設定パネルに新しいスライダーやconfig復元経路を追加する場合も、chainへの反映処理は`_apply_slider_values_to_chain()`に一本化し、`_updating_from_code`ガードを持つイベントハンドラ側からのみ条件付きで呼び出す構造を踏襲すること。
