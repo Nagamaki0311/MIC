@@ -478,3 +478,43 @@ class TestAdvancedPanelIsScrollableAndWindowFitsCommonScreens:
         app = app_factory()
         app.update()
         assert app.winfo_height() <= self.COMMON_LAPTOP_SCREEN_HEIGHT_MARGIN
+
+
+class TestAdvancedPanelDoesNotClipHorizontallyAndWindowIsResizable:
+    """T-007: 実機報告(v1.2.0でスライダーが横方向に見切れる)への対応(D-014)。
+
+    Canvasのwidthを内容(self._advanced_frame)の実測要求幅に合わせて動的に
+    設定していること、ウィンドウがユーザー側で拡縮可能になっていることを
+    確認する。
+    """
+
+    def test_advanced_canvas_width_covers_content_width(self, app_factory):
+        app = app_factory()
+        app.update()
+        app._toggle_advanced()
+        app.update()
+        app.update_idletasks()
+
+        canvas_width = app._advanced_canvas.winfo_width()
+        content_width = app._advanced_frame.winfo_reqwidth()
+        assert canvas_width >= content_width
+
+    def test_window_is_resizable(self, app_factory):
+        app = app_factory()
+        app.update()
+        assert app.resizable() == (1, 1)
+
+    def test_minsize_covers_advanced_panel_content(self, app_factory):
+        """パネルを開いた状態の内容が入る大きさ以上をminsizeとして設定して
+        いること(縮めすぎて再び見切れることを防ぐ)。"""
+        app = app_factory()
+        app.update()
+        app._toggle_advanced()
+        app.update()
+        app.update_idletasks()
+
+        required_width = app.winfo_reqwidth()
+        required_height = app.winfo_reqheight()
+        min_width, min_height = app.minsize()
+        assert min_width >= required_width
+        assert min_height >= required_height
