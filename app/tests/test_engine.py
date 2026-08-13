@@ -185,10 +185,19 @@ class TestMeterMeasuresActualOutput:
 
 class _FakeStream:
     """sd.InputStream(...)/sd.OutputStream(...)相当のフェイク。Pa_OpenStreamは
-    成功、Pa_StartStreamのみ失敗/成功を制御できるようにする。"""
+    成功、Pa_StartStream/Pa_StopStream/close()それぞれ独立に失敗/成功を
+    制御できるようにする(Reviewer指摘Medium対応の回帰テスト用)。"""
 
-    def __init__(self, start_should_fail: bool = False, **_kwargs):
+    def __init__(
+        self,
+        start_should_fail: bool = False,
+        stop_should_fail: bool = False,
+        close_should_fail: bool = False,
+        **_kwargs,
+    ):
         self.start_should_fail = start_should_fail
+        self.stop_should_fail = stop_should_fail
+        self.close_should_fail = close_should_fail
         self.start_called = False
         self.close_called = False
         self.stop_called = False
@@ -200,9 +209,13 @@ class _FakeStream:
 
     def close(self):
         self.close_called = True
+        if self.close_should_fail:
+            raise RuntimeError("close() failed")
 
     def stop(self):
         self.stop_called = True
+        if self.stop_should_fail:
+            raise RuntimeError("Pa_StopStream failed (device disconnected)")
 
 
 class TestStartOpensBothStreamsAndCleansUpOnFailure:
@@ -295,6 +308,33 @@ class TestStartOpensBothStreamsAndCleansUpOnFailure:
         assert engine._input_stream is None
         assert engine._output_stream is None
 
+    def test_input_cleanup_stop_failure_does_not_mask_original_output_failure(self, monkeypatch):
+        """Reviewer再指摘(Medium, CONFIRMED)への対応。
+
+        出力側のPa_StartStream失敗をトリガに入力側を後始末する際、
+        入力側自身の.stop()が例外を送出しても、(a)入力側の.close()は
+        スキップされずに呼ばれ、(b)最終的に伝播する例外は入力側のstop()失敗
+        ではなく、ユーザーに伝えるべき本来の原因(出力側のPa_StartStream失敗)
+        のままであること。
+        """
+        input_stream = _FakeStream(start_should_fail=False, stop_should_fail=True)
+        output_stream = _FakeStream(start_should_fail=True)
+        monkeypatch.setattr(engine_mod.sd, "InputStream", lambda **kwargs: input_stream)
+        monkeypatch.setattr(engine_mod.sd, "OutputStream", lambda **kwargs: output_stream)
+
+        engine = AudioEngine(_PassthroughChain())
+        with pytest.raises(RuntimeError, match="Pa_StartStream failed") as exc_info:
+            engine.start()
+
+        # 伝播した例外は出力側の元の失敗理由であり、入力側のstop()失敗ではない。
+        assert "Pa_StopStream" not in str(exc_info.value)
+        assert input_stream.stop_called is True
+        assert input_stream.close_called is True  # stop()失敗でclose()がスキップされない
+        assert output_stream.close_called is True
+        assert engine._input_stream is None
+        assert engine._output_stream is None
+        assert engine.is_running() is False
+
 
 class TestStop:
     def test_stop_stops_and_closes_both_streams(self, monkeypatch):
@@ -318,4 +358,30 @@ class TestStop:
     def test_stop_without_start_does_not_raise(self):
         engine = AudioEngine(_PassthroughChain())
         engine.stop()  # 例外を送出しないこと
+        assert engine.is_running() is False
+
+    def test_input_stream_stop_failure_does_not_skip_output_stream_cleanup(self, monkeypatch):
+        """Reviewer再指摘(Medium, CONFIRMED)への対応。
+
+        入力ストリームの.stop()が例外を送出しても、(a)入力ストリーム自身の
+        .close()はスキップされず、(b)出力ストリームのstop()/close()も
+        実行され、(c)両方の参照がNoneにクリアされ、(d)stop()自体は
+        呼び出し元(app.pyの_stop_engine()等)へ例外を伝播させない
+        (片方の失敗が全体のクリーンアップを止めない)。
+        """
+        input_stream = _FakeStream(stop_should_fail=True)
+        output_stream = _FakeStream()
+        monkeypatch.setattr(engine_mod.sd, "InputStream", lambda **kwargs: input_stream)
+        monkeypatch.setattr(engine_mod.sd, "OutputStream", lambda **kwargs: output_stream)
+
+        engine = AudioEngine(_PassthroughChain())
+        engine.start()
+        engine.stop()  # 例外を送出しないこと
+
+        assert input_stream.stop_called is True
+        assert input_stream.close_called is True  # stop()失敗でclose()がスキップされない
+        assert output_stream.stop_called is True  # 入力側の失敗が出力側の後始末を妨げない
+        assert output_stream.close_called is True
+        assert engine._input_stream is None
+        assert engine._output_stream is None
         assert engine.is_running() is False

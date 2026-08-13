@@ -57,7 +57,7 @@ def run_soak_test(n_frames: int = N_FRAMES) -> dict:
     assert resource is not None, "soak test requires the POSIX resource module"
 
     library_path = find_rnnoise_test_library_path()
-    chain = VoiceChain("discord_call", rnnoise_library_path=library_path)
+    chain = VoiceChain("quiet_low_voice", rnnoise_library_path=library_path)
     rng = np.random.default_rng(7)
 
     rss_samples_kb: list[int] = []

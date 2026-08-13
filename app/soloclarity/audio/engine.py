@@ -22,6 +22,7 @@ PortAudioのリアルタイム制約(コールバックは短時間で返る必�
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections import deque
 from typing import Callable, Optional
@@ -31,6 +32,8 @@ import sounddevice as sd
 
 from soloclarity.dsp.chain import FRAME_SIZE, SAMPLE_RATE, VoiceChain
 from soloclarity.dsp.meter import LevelMeter
+
+_logger = logging.getLogger(__name__)
 
 # (in_rms_dbfs, in_peak_dbfs, out_rms_dbfs, out_peak_dbfs)
 MeterCallback = Callable[[float, float, float, float], None]
@@ -154,6 +157,35 @@ class AudioEngine:
         outdata[:, 0] = frame
 
     @staticmethod
+    def _safe_close(stream) -> None:
+        """close()の例外を握りつぶさずログへ残した上で伝播させない。
+
+        呼び出し元(start()の異常系・stop())は「本来伝えるべき別の例外(元の
+        Pa_StartStream失敗理由等)」を持っているか、複数ストリームの後始末を
+        続行する必要があるため、ここで例外を再送出すると呼び出し元の処理が
+        中断し他方の後始末がスキップされてしまう(Reviewer指摘、Medium
+        CONFIRMED)。ログにだけ残し、後始末自体は最後まで試みる。
+        """
+        try:
+            stream.close()
+        except Exception:
+            _logger.exception("ストリームのclose()に失敗しました(後始末を継続します)")
+
+    @classmethod
+    def _safe_stop_and_close(cls, stream) -> None:
+        """stop()とclose()をそれぞれ独立して試みる。
+
+        stop()が例外を送出しても、そのせいでclose()がスキップされたり、
+        (start()の異常系呼び出し元が持つ)本来の失敗理由がstop()の例外で
+        上書きされたりしないようにする。
+        """
+        try:
+            stream.stop()
+        except Exception:
+            _logger.exception("ストリームのstop()に失敗しました(後始末を継続します)")
+        cls._safe_close(stream)
+
+    @staticmethod
     def _open_and_start(factory, device, callback):
         stream = factory(
             samplerate=SAMPLE_RATE,
@@ -169,8 +201,10 @@ class AudioEngine:
             # Pa_OpenStream(factory(...))は成功したがPa_StartStream(.start())が
             # 失敗したケース。sounddeviceのストリームクラスに__del__は無くGCでも
             # 解放されないため、ここでcloseしないとPaStreamハンドルがリークする
-            # (D-006 Reviewer指摘2と同型のパターンを2ストリームへ適用)。
-            stream.close()
+            # (D-006 Reviewer指摘2と同型のパターンを2ストリームへ適用)。close()
+            # 自体が例外を送出しても、本来伝えるべきPa_StartStream失敗の原因を
+            # マスクしないよう_safe_close()でログにとどめる。
+            AudioEngine._safe_close(stream)
             raise
         return stream
 
@@ -184,22 +218,26 @@ class AudioEngine:
             )
         except Exception:
             # 入力ストリームは開始済みのため、出力側の失敗時はここでstop/closeして
-            # リークを防いでから例外を再送出する(D-009決定)。
-            input_stream.stop()
-            input_stream.close()
+            # リークを防いでから例外を再送出する(D-009決定)。入力側のstop()/close()
+            # が失敗しても、伝播させるべき元の例外(出力側のPa_StartStream失敗)を
+            # マスクしないよう_safe_stop_and_close()でログにとどめる(Reviewer指摘、
+            # Medium CONFIRMED)。
+            self._safe_stop_and_close(input_stream)
             raise
         self._input_stream = input_stream
         self._output_stream = output_stream
 
     def stop(self) -> None:
-        if self._input_stream is not None:
-            self._input_stream.stop()
-            self._input_stream.close()
-            self._input_stream = None
-        if self._output_stream is not None:
-            self._output_stream.stop()
-            self._output_stream.close()
-            self._output_stream = None
+        # 先に参照をクリアしてからstop/closeを試みる。片方のstop()/close()が
+        # 例外を送出しても(_safe_stop_and_close側でログのみに留め伝播させない)、
+        # is_running()は呼び出し直後から一貫して「停止済み」を返し、もう一方の
+        # 後始末も必ず試みられる(Reviewer指摘、Medium CONFIRMED)。
+        input_stream, self._input_stream = self._input_stream, None
+        output_stream, self._output_stream = self._output_stream, None
+        if input_stream is not None:
+            self._safe_stop_and_close(input_stream)
+        if output_stream is not None:
+            self._safe_stop_and_close(output_stream)
 
     def is_running(self) -> bool:
         return self._input_stream is not None and self._output_stream is not None

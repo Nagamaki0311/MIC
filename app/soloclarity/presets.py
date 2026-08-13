@@ -1,8 +1,8 @@
 """パラメータ定義（明瞭度/ノイズ除去の3段階 + プリセット）。
 
-数値の根拠はdocs/decisions.md D-001およびIssue対応タスク（docs/tasks.md T-001）の
-仕様書に記載のパラメータ表そのもの。UIやDSPチェーンはこのモジュールの値のみを参照し、
-数値をコード中に埋め込まないこと。
+数値の根拠はdocs/decisions.md D-001（初版）・D-010（既定プリセットの再調整、
+ノイズ除去3段階の再調整）に記載のパラメータ表そのもの。UIやDSPチェーンはこの
+モジュールの値のみを参照し、数値をコード中に埋め込まないこと。
 """
 
 from __future__ import annotations
@@ -62,6 +62,10 @@ CLARITY_STAGES: dict[str, ClarityStage] = {
 
 CLARITY_LEVELS: tuple[str, ...] = ("weak", "standard", "strong")
 
+# 明瞭度/ノイズ除去とも同じキー(weak/standard/strong)を使うため、
+# 表示名の対応表は共通で1つにまとめる。
+LEVEL_LABELS_JA: dict[str, str] = {"weak": "弱", "standard": "標準", "strong": "強"}
+
 
 # --- ノイズ除去（RNNoise + 発話確率ゲート） ---------------------------------
 
@@ -74,9 +78,9 @@ class NoiseStage:
 
 
 NOISE_STAGES: dict[str, NoiseStage] = {
-    "weak": NoiseStage(wet_dry_mix=0.30, gate_threshold=0.15, gate_release_ms=300.0),
-    "standard": NoiseStage(wet_dry_mix=0.70, gate_threshold=0.30, gate_release_ms=200.0),
-    "strong": NoiseStage(wet_dry_mix=1.00, gate_threshold=0.45, gate_release_ms=120.0),
+    "weak": NoiseStage(wet_dry_mix=0.30, gate_threshold=0.12, gate_release_ms=350.0),
+    "standard": NoiseStage(wet_dry_mix=0.78, gate_threshold=0.20, gate_release_ms=250.0),
+    "strong": NoiseStage(wet_dry_mix=1.00, gate_threshold=0.25, gate_release_ms=200.0),
 }
 
 NOISE_LEVELS: tuple[str, ...] = ("weak", "standard", "strong")
@@ -148,16 +152,16 @@ PRESETS: dict[str, Preset] = {
         compressor=CompressorParams(-24.0, 3.0, 10.0, 180.0),
         agc=AgcParams(target_dbfs=-16.0, max_gain_db=12.0),
     ),
-    "discord_call": Preset(
-        name="discord_call",
-        label_ja="Discord通話",
-        clarity="standard",
-        noise="standard",
-        compressor=CompressorParams(-22.0, 2.5, 12.0, 200.0),
-        agc=AgcParams(target_dbfs=-17.0, max_gain_db=10.0),
+    "quiet_low_voice": Preset(
+        name="quiet_low_voice",
+        label_ja="小さくて低い声＋高品質ノイズ除去",
+        clarity="strong",
+        noise="strong",
+        compressor=CompressorParams(-23.0, 2.8, 10.0, 200.0),
+        agc=AgcParams(target_dbfs=-17.0, max_gain_db=12.0),
     ),
 }
 
-DEFAULT_PRESET = "discord_call"
+DEFAULT_PRESET = "quiet_low_voice"
 
-PRESET_ORDER: tuple[str, ...] = ("natural", "low_voice", "quiet_voice", "discord_call")
+PRESET_ORDER: tuple[str, ...] = ("natural", "low_voice", "quiet_voice", "quiet_low_voice")
