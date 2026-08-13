@@ -585,3 +585,58 @@ T-005で実装済みの9条件テスト(条件1-6は無変更で流用)のうち
 - `advanced_overrides`のキー`noise_wet_dry_mix`が廃止され`noise_background_mix`/`noise_impact_mix`に置き換わった(D-012で意図された仕様変更、後方互換は取らない)。
 - 新規ファイル: `app/soloclarity/dsp/transient.py`、`app/tests/test_transient.py`。変更ファイル: `app/soloclarity/presets.py`、`app/soloclarity/dsp/chain.py`、`app/soloclarity/gui/app.py`、`app/tests/test_chain.py`、`app/tests/test_app_gui.py`、`app/はじめにお読みください.txt`、`app/WINDOWS_VERIFICATION_CHECKLIST.md`。
 - Windows実機・Discordでの実際の聞こえ方(特にインパクト音が「自然な範囲で残る」という主観評価)は、この環境では引き続き検証不可能(D-001の既知の制約)。`app/WINDOWS_VERIFICATION_CHECKLIST.md`に沿ったユーザー側での最終確認が必要。
+
+---
+
+## D-014: T-007 詳細設定パネルのスライダーが横方向に見切れる問題の原因特定・修正方針
+
+- 日付: 2026-08-13
+- 状態: 採用
+
+### 背景
+D-012で追加した`tk.Canvas`+`ttk.Scrollbar`による縦スクロール対応(T-006)の実機検証(v1.2.0)で、縦方向の見切れは解消したものの、今度は詳細設定スライダー(`tk.Scale`)が横方向に見切れて表示され、右側の目安ラベルやスライダーのつまみが見えないという新たな問題が報告された。ユーザーからはあわせて、ウィンドウサイズを手元で拡縮できるようにしてほしいという要望があった。
+
+### 決定
+1. **根本原因**: `app/soloclarity/gui/app.py`の`_build_advanced_panel()`で`tk.Canvas`を生成する際、`height=ADVANCED_PANEL_MAX_HEIGHT_PX`(縦方向の見切れ対策としてD-012で明示指定済み)は指定しているが、`width`を指定していない。Tkinterの`Canvas`は`width`未指定時、内部の子ウィジェット(`self._advanced_frame`、ラベル・スライダー・目安・説明文を含む実際の必要幅は500px超)の要求サイズとは無関係に、Tkの既定幅(数百px未満)で確保される。結果としてCanvasの表示領域(ビューポート)が内容より狭くなり、スライダー本体を含む右側が切り取られる。縦方向はD-012で明示的に`height`を指定していたため同じ問題が起きていなかった。
+2. **修正方針**:
+   - `_build_advanced_panel()`でスライダー行をすべて構築した後、`update_idletasks()`で`self._advanced_frame`の実際の要求幅(`winfo_reqwidth()`)を確定させ、その値を`self._advanced_canvas`の`width`へ明示的に設定する(Canvas自身に子ウィジェットの要求幅を反映させる、ハードコードされた固定px値は使わない)。
+   - `self.resizable(False, False)` → `self.resizable(True, True)`に変更し、ユーザーがウィンドウサイズを手動で拡縮できるようにする(実機からの明示的な要望)。
+   - リサイズ後にウィンドウを縮めすぎて再度見切れることを防ぐため、詳細設定パネルを含めた必要最小幅・高さを`minsize()`で設定する(パネルは初期状態で非表示のため、`_advanced_frame.winfo_reqwidth()`を直接使って計算し、ルートウィンドウの`winfo_reqwidth()`だけに頼らない)。
+   - ルートの列(`columnconfigure`)・詳細設定パネル行の`rowconfigure`に`weight`を設定し、ウィンドウを広げた際に各フレーム・Canvasの表示領域も追従して広がるようにする(広げても中身のサイズが変わらず余白だけ増える、という中途半端な体験を避ける)。
+
+### 理由
+- 判定ラダーに従い、新しいウィジェット・外部ライブラリを追加せず、Tkinter標準の`winfo_reqwidth()`(既存の`ADVANCED_PANEL_MAX_HEIGHT_PX`という固定pxアプローチよりも、内容に追従する分壊れにくい)と`resizable()`/`minsize()`という標準APIのみで解決する。
+- 「バグは根本原因を直す」(AGENTS.md)に従い、Canvasの幅が子の要求幅を反映していないという構造上の原因に対処する。個々のスライダーの`length=220`を単に伸ばすような対症療法は、根本原因(Canvasビューポートの幅)を放置したままになるため採用しない。
+- resizable化はD-012時点では「既存レイアウトの安全性を優先」として意図的に見送っていたが(D-012該当箇所参照)、実機フィードバックにより解像度・DPI環境によって最適なウィンドウサイズが一様でないことが明らかになったため、ここで方針を変更する。
+
+### 影響
+- `app/soloclarity/gui/app.py`の`__init__`・`_build_advanced_panel()`を変更。
+- 既存の`ADVANCED_PANEL_MAX_HEIGHT_PX`(縦方向の初期高さの目安)はそのまま残す(resizable化後もウィンドウの初期サイズとしては妥当なため)。
+- 実装はDeveloperへ委任し、xvfbでの見切れ再現確認(修正前)・解消確認(修正後)、回帰テスト追加、既存118件のpytestが引き続きpassすることを実装完了の条件とする。
+
+### 修正ループ(Reviewer指摘対応、初回実装をManagerが引き取って修正)
+
+初回実装(Developer agentがセッション上限で中断したためManagerが引き継いで完成させた)をReviewerが検証した結果、High×1・Medium×1・Low×2(うち1件はPLAUSIBLE)の指摘を受けた。
+
+1. **High(CONFIRMED)**: `minsize()`を「パネルを開いた状態」の`self.winfo_reqheight()`(635px)から算出していたため、パネルを一度も開いていない起動直後(閉状態、本来346pxで足りる)でもウィンドウが635pxに強制的に引き伸ばされ、`rowconfigure(6, weight=1)`により空白がちょうどパネルの行(row=6)へ集中して表示されていた。基本画面をコンパクトに保つという設計意図(D-012)に反する新規回帰。
+   - 対応: `minsize()`の高さは閉状態の`self.winfo_reqheight()`のみを使うよう変更した(縦方向はCanvas自身のスクロールバーで常にアクセスできるため、開いた状態の高さを最小値として強制する必要がない)。幅は「閉状態の`self.winfo_reqwidth()`」と「`self._advanced_outer.winfo_reqwidth()`(パネルを開いた状態で測る)+ padx分」のどちらか広い方を採用し、パネルを開いた後にユーザーが幅だけ縮めて再び見切れることは引き続き防ぐ。
+2. **Medium(CONFIRMED)**: `self.columnconfigure(0, weight=1)`をrootに設定していたため、詳細設定パネル(row=6)だけでなく、デバイス選択・処理設定等の既存フレーム(row=0〜5)も同じ列を共有しており、ウィンドウを横に広げると各フレームの外枠だけが不自然に間延びし、内部のCombobox等は左寄せのまま右側に大きな空白ができていた。
+   - 対応: `self.columnconfigure(0, weight=1)`を削除した。ウィンドウを横に広げた場合は、単純に全体の右側に余白ができるのみとなる(個々のフレームが間延びする見た目上の崩れは解消)。
+3. **Low(CONFIRMED、文書不整合)**: D-014の決定事項では「`_advanced_frame.winfo_reqwidth()`を直接使って計算し、ルートウィンドウの`winfo_reqwidth()`だけに頼らない」としていたが、初回実装は逆に一時grid→root測定という方式だった。
+   - 対応: 下記「第2ラウンド」の通り、`_advanced_outer`の一時grid自体はREQUIRED(必要)と判明したため残したが、計測方法自体はD-014の意図(内容の実測値から算出する、ハードコードしない)を満たしている。本節の記述をもって整合させる。
+4. **Low/PLAUSIBLE**: `_build_advanced_panel()`内の一時grid区間に、`_toggle_advanced()`と同様の`_updating_from_code`ガード(D-013で確立、tk.Scaleの初回マップ時の自動発火対策)が無かった。このLinux環境では非発火を確認したが、Windows実機のウィンドウイングモデルの違いにより再現しない保証はないという指摘。
+   - 対応: 下記「第2ラウンド」の通り、この一時grid区間を`_updating_from_code`ガードで囲んだ。結果的にこの指摘は「起きるかもしれない懸念」ではなく「実際に起きる回帰」だったことが判明した(次項参照)。
+
+### 第2ラウンド(Managerが上記1の修正を検証中に自ら発見した新規回帰、再修正)
+
+上記1の対応として、いったん`_advanced_outer`の一時grid→grid_remove処理を完全に廃止し(`_advanced_frame.winfo_reqwidth()`のみで幅を算出する方式に変更)、`pytest tests/`を実行したところ、既存テスト`TestAdvancedApplyFeedback::test_config_restore_does_not_show_feedback`が新たに失敗することを発見した(修正前=コミット済みの初回実装では発生しない、この第2ラウンドの変更で新たに顕在化)。
+
+調査の結果、次の事実が判明した:
+- `winfo_reqwidth()`等のサイズ計測は、詳細設定パネルのスライダー群(`tk.Scale`)を初めて実体化(realize)させる副作用を持つ。
+- 実体化したtk.Scaleは、D-013で確認済みの「値変更を伴わず`-command`を一度だけ遅延発火する」既知の挙動の対象になるが、この遅延発火は実体化した直後に`update_idletasks()`を呼んでも処理されず、実体化後に最初に`self.update()`が呼ばれたタイミングまで予約されたまま残り続ける。
+- `_build_advanced_panel()`(`__init__`の中)でこの実体化が起きても、`_updating_from_code`ガードは`__init__`完了時点で解除済みのため、後で(例えばテストコードが)最初に`app.update()`を呼んだ瞬間に、ガードなしで全16項目分の`_on_advanced_slider_changed`が発火し、「設定を反映しました」というユーザー操作用フィードバックが誤表示される。
+- 初回実装(D-014本文の決定通り)に存在した「`_advanced_outer.grid(...)`→`update_idletasks()`→`minsize(...)`→`grid_remove()`」という一時map→unmapの手順は、たまたまこの予約された遅延発火を打ち消す副作用を持っていた(xvfb環境で実測確認: 一時map→unmapを行うコードでは`_on_advanced_slider_changed`が一度も発火しないのに対し、行わないコードでは`app.update()`のタイミングで必ず16件発火する)。
+
+このため、一時grid→grid_removeの処理自体は必要と判断して残し(上記1の「不要になったため削除した」という当初の対応方針を撤回)、Reviewer指摘4(PLAUSIBLE)が推奨した通り`_updating_from_code`ガードでこの区間を囲んだ。あわせて、`min_width`算出に使う`_advanced_outer.winfo_reqwidth()`も、grid_remove後の非mapped状態ではなく実際にgridした(mapped)状態で測るよう変更した(非mapped状態でのLabelFrameのreqwidthは正しい値を返さないことが実測でわかったため)。高さのminsizeには閉状態(grid前)の`self.winfo_reqheight()`を使う(上記1の対応方針)のは変更していない。
+
+再修正後、`cd /home/user/MIC/app && python -m pytest tests/ -q`を3回連続実行し**123 passed**(既存118件 + 新規5件: Canvas幅・resizable・minsize幅・閉状態でのウィンドウ膨張防止・他フレーム非伸縮の5テスト)、フレーキーな失敗なし、`pyflakes soloclarity tests`警告0件を確認した。

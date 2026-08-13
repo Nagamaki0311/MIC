@@ -478,3 +478,75 @@ class TestAdvancedPanelIsScrollableAndWindowFitsCommonScreens:
         app = app_factory()
         app.update()
         assert app.winfo_height() <= self.COMMON_LAPTOP_SCREEN_HEIGHT_MARGIN
+
+
+class TestAdvancedPanelDoesNotClipHorizontallyAndWindowIsResizable:
+    """T-007: 実機報告(v1.2.0でスライダーが横方向に見切れる)への対応(D-014)。
+
+    Canvasのwidthを内容(self._advanced_frame)の実測要求幅に合わせて動的に
+    設定していること、ウィンドウがユーザー側で拡縮可能になっていることを
+    確認する。
+    """
+
+    def test_advanced_canvas_width_covers_content_width(self, app_factory):
+        app = app_factory()
+        app.update()
+        app._toggle_advanced()
+        app.update()
+        app.update_idletasks()
+
+        canvas_width = app._advanced_canvas.winfo_width()
+        content_width = app._advanced_frame.winfo_reqwidth()
+        assert canvas_width >= content_width
+
+    def test_window_is_resizable(self, app_factory):
+        app = app_factory()
+        app.update()
+        assert app.resizable() == (1, 1)
+
+    def test_minsize_width_covers_advanced_panel_content(self, app_factory):
+        """パネルを開いた状態で必要な幅以上をminsizeの幅として設定していること
+        (幅だけ縮めて再び見切れることを防ぐ)。高さは意図的にこの下限に含めない
+        (次のtest_closed_state_window_is_not_inflated_by_minsize参照)。"""
+        app = app_factory()
+        app.update()
+        app._toggle_advanced()
+        app.update()
+        app.update_idletasks()
+
+        required_width = app.winfo_reqwidth()
+        min_width, _min_height = app.minsize()
+        assert min_width >= required_width
+
+    def test_closed_state_window_is_not_inflated_by_minsize(self, app_factory):
+        """Reviewer指摘(High, CONFIRMED)の回帰防止。詳細設定パネルを一度も
+        開いていない起動直後に、minsize()の高さがパネルを開いた状態のサイズ
+        まで強制的に引き伸ばし、パネルの行(row=6)に空白を作っていないこと。
+        縦方向はCanvas自身のスクロールバーで常にアクセスできるため、開いた
+        状態の高さをウィンドウ全体の最小値として強制する必要はない。"""
+        app = app_factory()
+        app.update()
+        closed_height = app.winfo_height()
+
+        app._toggle_advanced()
+        app.update()
+        open_height = app.winfo_height()
+
+        assert closed_height < open_height
+
+    def test_widening_window_does_not_stretch_unrelated_frames(self, app_factory):
+        """Reviewer指摘(Medium, CONFIRMED)の回帰防止。ルートのcolumnconfigure
+        にweightを与えると、詳細設定パネル(row=6)だけでなくデバイス選択等の
+        他フレーム(row=0)も同じ列を共有しているため、ウィンドウを横に広げた
+        際にそれらの外枠だけ不自然に間延びしてしまっていた。"""
+        app = app_factory()
+        app.update()
+        device_frame = app.grid_slaves(row=0, column=0)[0]
+        app.update_idletasks()
+        before_width = device_frame.winfo_width()
+
+        app.geometry(f"{app.winfo_width() + 800}x{app.winfo_height()}")
+        app.update()
+
+        after_width = device_frame.winfo_width()
+        assert after_width == before_width

@@ -30,6 +30,10 @@ TEST_THREAD_POLL_INTERVAL_SECONDS = 0.01
 # ウィンドウ全体が画面に収まるよう、この高さを超える分はCanvas+Scrollbarで
 # スクロールさせる(Manager指摘: 縦長で画面からはみ出る問題への対応)。
 ADVANCED_PANEL_MAX_HEIGHT_PX = 260
+# 詳細設定パネルのCanvas幅を、内容(self._advanced_frame)の実測要求幅に対して
+# どれだけ余分に確保するかの余白(px)。Canvasの境界線・内部パディングの丸め誤差を
+# 吸収するための安全マージンであり、内容の実測値(D-014)を上書きする固定値ではない。
+ADVANCED_CANVAS_WIDTH_BUFFER_PX = 16
 # スライダー変更が反映されたことを示すフィードバック表示を消すまでの時間。
 ADVANCED_APPLY_FEEDBACK_DURATION_MS = 1500
 
@@ -231,7 +235,16 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f"SoloClarity v{__version__}")
-        self.resizable(False, False)
+        # 詳細設定パネルのスライダーが横方向に見切れる問題(D-014)を受け、
+        # ユーザーが手元でウィンドウサイズを拡縮できるようにする。
+        self.resizable(True, True)
+        # 詳細設定パネル(row=6、_build_advanced_panel参照)にのみ縦方向の伸縮を
+        # 割り当て、ウィンドウを広げた際にCanvasの表示領域も追従して広がるように
+        # する。列(column=0)にはweightを与えない: 与えるとデバイス選択・処理設定
+        # 等の他フレーム(row=0〜5)も同じ列を共有しているため、ウィンドウを横に
+        # 広げた際にそれらの外枠だけが不自然に間延びしてしまう(Reviewer指摘Medium、
+        # D-014参照)。
+        self.rowconfigure(6, weight=1)
 
         self.app_config = AppConfig.load()
         try:
@@ -388,6 +401,13 @@ class App(tk.Tk):
         # ノートPC画面(1366x768等)に収まらずウィンドウ下部が画面外に隠れる
         # (Manager指摘)。そのためCanvas+Scrollbarで縦スクロール可能にラップする。
         self._advanced_outer = ttk.LabelFrame(self, text="詳細設定(パラメータの生値)")
+        self._advanced_outer_grid_kwargs = {
+            "row": 6,
+            "column": 0,
+            "sticky": "nsew",
+            "padx": 8,
+            "pady": 4,
+        }
         self._advanced_outer.columnconfigure(0, weight=1)
         self._advanced_outer.rowconfigure(0, weight=1)
         self._advanced_canvas = tk.Canvas(
@@ -466,6 +486,47 @@ class App(tk.Tk):
                 wraplength=420,
                 justify="left",
             ).grid(row=row + 1, column=0, columnspan=4, sticky="w", pady=(0, 6))
+
+        # D-014: Canvasはwidth未指定だとTkの既定幅(内容より狭い)になり、
+        # スライダーが横方向に見切れる。全スライダー行を構築し終えた後に
+        # self._advanced_frameの実際の要求幅を測り、その値(+安全マージン)を
+        # Canvasの幅として明示的に設定する(固定pxのハードコードはしない)。
+        self._updating_from_code = True
+        self.update_idletasks()
+        advanced_content_width = self._advanced_frame.winfo_reqwidth()
+        self._advanced_canvas.configure(
+            width=advanced_content_width + ADVANCED_CANVAS_WIDTH_BUFFER_PX
+        )
+
+        # resizable化(D-014)に伴い、詳細設定パネルの内容が見切れるほど
+        # ウィンドウを縮められないよう最小サイズを設定する。この時点で
+        # self._advanced_outerはまだgridされていない(閉状態)ため、
+        # self.winfo_reqwidth()/reqheight()は基本画面のみの要求サイズを表す。
+        closed_reqwidth = self.winfo_reqwidth()
+        closed_reqheight = self.winfo_reqheight()
+
+        # 幅は、パネルを開いた際に必要な幅も加味し、閉状態の幅とどちらか広い方を
+        # 採用する(パネルを開いた後にユーザーが幅だけ縮めて再び見切れることを
+        # 防ぐ)。正確な値を測るため、詳細設定パネルを実際に一度gridしてから
+        # 測る。この一時的なmap→unmapは、上記のサイズ計測(winfo_reqwidth()等)が
+        # スライダー群を初めて実体化(realize)させる副作用として予約する、
+        # tk.Scaleの「値変更を伴わず-commandを一度だけ遅延発火する」既知の挙動
+        # (D-013)を打ち消す役割も兼ねる(Reviewer指摘4のPLAUSIBLE指摘: 予約
+        # されたままだと__init__完了後の最初のself.update()呼び出しでガード
+        # なしに発火してしまうことをxvfb環境で確認した)。高さは閉状態の値を
+        # そのまま使う(縦方向はCanvas自身のスクロールバーで常にアクセスできる
+        # ため、開いた状態の高さを最小値として強制する必要はない。強制すると
+        # 閉状態でも常に余白が生まれてしまう問題があった。Reviewer指摘High、
+        # D-014参照)。
+        self._advanced_outer.grid(**self._advanced_outer_grid_kwargs)
+        self.update_idletasks()
+        panel_outer_reqwidth = self._advanced_outer.winfo_reqwidth()
+        panel_grid_padx_total = self._advanced_outer_grid_kwargs["padx"] * 2
+        min_width = max(closed_reqwidth, panel_outer_reqwidth + panel_grid_padx_total)
+        self.minsize(min_width, closed_reqheight)
+        self.update()
+        self._advanced_outer.grid_remove()
+        self._updating_from_code = False
 
     # --- 設定の復元/保存 --------------------------------------------------
 
@@ -652,7 +713,7 @@ class App(tk.Tk):
             # ある(xvfb実機検証で確認したTkinter固有の挙動)。ユーザー操作では
             # ないため、既存の_updating_from_codeガードで無視してから表示する。
             self._updating_from_code = True
-            self._advanced_outer.grid(row=6, column=0, sticky="ew", padx=8, pady=4)
+            self._advanced_outer.grid(**self._advanced_outer_grid_kwargs)
             self.update()
             self._updating_from_code = False
             self._advanced_toggle_button.configure(text="詳細設定を閉じる")

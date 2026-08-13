@@ -4,6 +4,51 @@
 
 ---
 
+## 2026-08-13 T-007完了、version 1.2.1確定
+
+### 実施内容
+- Reviewer(2巡目)が、1巡目で指摘したHigh×1(閉状態でのウィンドウ膨張)・Medium×1(他フレームの不自然な伸縮)・Low×2(文書不整合・ガード欠如)のすべてについて、コード読解・xvfb実機実測・Before/After回帰テストの3系統で解消を確認し、「このままマージしてよい」と最終承認した。新たな回帰も確認されなかった。
+- `docs/tasks.md`のT-007を完了に更新した。
+- `app/soloclarity/__init__.py`の`__version__`を`1.2.0`→`1.2.1`へ変更(横見切れ・resizable化はバグ修正・UX改善であり新機能追加ではないため、D-008のバージョニング方針に従いパッチバージョンを上げる判断)。
+
+### 結果
+- このLinux環境での最終確認: `pytest tests/` 123 passed(3回連続、フレーキーな失敗なし)、`pyflakes soloclarity tests` 警告0件。
+- Windows実機での最終確認(実際に横見切れが解消しているか、ウィンドウのリサイズが自然に行えるか)は、このLinux環境では引き続き検証不可能。`app/WINDOWS_VERIFICATION_CHECKLIST.md`に沿ったユーザー側での確認が必要(次回追記予定)。
+
+### 次回開始位置
+- コミット・PR作成・GitHub ActionsのCI実行結果を確認し、成功していればPRをマージして最終Artifact(`SoloClarity-v1.2.1-{ビルド日}`)のダウンロードリンクをユーザーへ案内する。
+
+## 2026-08-13 T-007 Reviewer指摘対応・第2ラウンドの自己発見バグ修正
+
+### 実施内容
+- Developer agentがセッション上限で中断したため、Managerが実装(Canvas幅の動的算出・resizable化・minsize設定・行/列weight設定)を引き取って完成させ、xvfbで見切れ解消を実測確認、回帰テスト3件を追加してpytest 121 passed・pyflakes警告0件を確認した上でコミット・プッシュした。
+- Reviewerによる敵対的検証で、High×1(閉状態でも`minsize`がパネルを開いた状態の高さまでウィンドウを強制的に膨張させ、row=6に不要な空白ができる)、Medium×1(`columnconfigure(0, weight=1)`が他フレームにも波及し、ウィンドウを広げると各フレームが不自然に間延びする)、Low×2(D-014の文書と実装の不一致、`_updating_from_code`ガード漏れのPLAUSIBLE指摘)が報告された。
+- Managerが指摘を引き取り、(1)minsizeの高さを閉状態のみから算出、(2)`columnconfigure(0, weight=1)`を削除、に修正。この過程で、Reviewer指摘4(PLAUSIBLE)の対応として一時grid→grid_remove処理を一度完全に廃止したところ、既存テスト`TestAdvancedApplyFeedback::test_config_restore_does_not_show_feedback`が新たに失敗することを自ら発見した。
+- 調査の結果、この一時map→unmapの手順は「D-013で確認済みのtk.Scaleの遅延`-command`発火」を打ち消す副作用を持っており、単純に廃止すると`__init__`完了後の最初の`app.update()`呼び出しでガードなしに発火してしまう(誤ってフィードバック表示・config保存が起きる)実際の回帰であることが判明した。一時grid→grid_removeの処理自体は残し、`_updating_from_code`ガードで囲む対応に変更した(Reviewer指摘4が推奨していた対応そのもの)。
+- `docs/decisions.md`のD-014に「修正ループ」「第2ラウンド」節を追加し、上記の経緯・最終実装を記録した。
+
+### 結果
+- `cd /home/user/MIC/app && python -m pytest tests/ -q`を3回連続実行し**123 passed**(既存118件 + 新規5件)、フレーキーな失敗なし。`pyflakes soloclarity tests`警告0件。
+- 回帰テスト5件: Canvas幅が内容幅以上であること、resizableであること、minsizeの幅がパネル展開時の要求幅以上であること、**閉状態でウィンドウが不要に膨張していないこと(High再発防止)**、**ウィンドウを広げても他フレームが不自然に伸縮しないこと(Medium再発防止)**。
+
+### 次回開始位置
+- 修正後の差分をコミット・プッシュし、Reviewerへ再検証を依頼する(Reviewerの指摘が実際にすべて解消しているか、新たに追加した一時grid区間のガード付き実装に問題がないかを再度敵対的に確認してもらう)。
+- 承認が得られたら、`app/soloclarity/__init__.py`の`__version__`をバグ修正としてパッチバージョン(1.2.1)へ更新し、コミット・PR作成・CI確認・マージ・最終ビルド提示という一連の流れを行う。
+
+## 2026-08-13 T-007起票、原因特定・Developerへ委任
+
+### 実施内容
+- v1.2.0の実機スクリーンショットで、T-006で追加したCanvas+Scrollbarのスライダーが横方向に見切れる問題、およびウィンドウを手動でリサイズできるようにしてほしいという要望が報告された。
+- `app/soloclarity/gui/app.py`を読み、原因を特定した: `_build_advanced_panel()`の`tk.Canvas`生成時、`height`(D-012で縦見切れ対策として明示指定済み)は指定されているが`width`が未指定のため、子ウィジェット(実際の必要幅500px超)より狭いTk既定幅でビューポートが確保され、スライダー右側が切り取られていた。
+- `docs/tasks.md`にT-007を起票(状態=実装中)、`docs/decisions.md`にD-014として原因・修正方針(Canvas幅を`winfo_reqwidth()`で動的算出、`resizable(True, True)`化、`minsize()`設定、行・列の`weight`設定)を記録した。
+
+### 結果
+- 実装自体はまだ着手していない(Developerへ委任する直前)。
+
+### 次回開始位置
+- Developer agentの実装完了を待ち、xvfbでの見切れ再現(修正前)・解消(修正後)確認、`pytest tests/`(既存118件がpassすること)を確認した上でReviewerへ回す。
+- Reviewer承認後、`app/soloclarity/__init__.py`の`__version__`をバグ修正としてパッチバージョン(1.2.1)へ更新し、コミット・PR作成・CI確認・マージ・最終ビルド提示という一連の流れ(T-001〜T-006と同じワークフロー)を行う。
+
 ## 2026-08-13 T-006完了、version 1.2.0確定
 
 ### 実施内容
