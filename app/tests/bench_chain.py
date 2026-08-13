@@ -19,7 +19,7 @@ FRAME_BUDGET_MS = 1000.0 * FRAME_SIZE / SAMPLE_RATE  # 10.0ms
 BUDGET_USAGE_RATIO_THRESHOLD = 0.30  # 実処理時間は予算の30%未満であることを期待する
 
 
-def run_benchmark(preset_name: str = "discord_call") -> dict:
+def run_benchmark(preset_name: str = "quiet_low_voice") -> dict:
     library_path = find_rnnoise_test_library_path()
     chain = VoiceChain(preset_name, rnnoise_library_path=library_path)
 

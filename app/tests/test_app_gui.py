@@ -156,9 +156,7 @@ class TestExtremeAdvancedOverrideValuesAreClamped:
 
         app._apply_advanced_overrides(overrides)
 
-        spec_ranges = {
-            key: (lo, hi) for key, _label, lo, hi, _res in app_mod.ADVANCED_SLIDER_SPECS
-        }
+        spec_ranges = {spec.key: (spec.lo, spec.hi) for spec in app_mod.ADVANCED_SLIDER_SPECS}
         for key in overrides:
             lo, hi = spec_ranges[key]
             slider_value = app._advanced_sliders[key].get()

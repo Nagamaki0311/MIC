@@ -274,3 +274,171 @@
 - PR #4のCI（windows-latest、run 31643953024）で、`tests/test_app_gui.py::TestWindowsDpiAwareness::test_no_op_and_does_not_raise_on_linux`が`AssertionError: assert 'Windows' != 'Windows'`で失敗した。このテストは「`_set_windows_dpi_awareness()`がLinux上でno-opであること」を検証する意図で、テスト自体の前提確認として`assert platform.system() != "Windows"`を書いていたが、T-003でCIをwindows-latestでも実行するようになった結果、Windows上でこのテスト自体が実行され、前提確認が自己矛盾で失敗する状態になっていた（D-005実装時点ではこのテストはこのLinux開発環境でしか実行されていなかったため、Windows上での実行は今回のCI実行が初めてだった）。
 - テストをプラットフォームに依存しない形（`_set_windows_dpi_awareness()`がどのプラットフォームでも例外を送出しないことのみを確認）に修正した。Linux上では既存どおりno-opパス、Windows上では実際のDPI awareness試行パス（失敗しても例外を握りつぶす、D-005参照）をそれぞれ検証する形になり、むしろWindows実機での初めての実行検証という副次的な価値も得られた。
 - このLinux環境で`pytest tests/test_app_gui.py`を再実行し12件すべてpassすることを確認済み（Windows上での再実行結果はCIの次回実行で確認する）。
+
+---
+
+## D-009: SoloCast→CABLE Input間のストリーム開始エラー(PaErrorCode -9993)の原因特定
+
+- 日付: 2026-08-12
+- 状態: 採用
+
+### 背景
+- ユーザーがv1.0.0のexeをWindows実機で実際に起動し、マイク(HyperX SoloCast)と出力先(CABLE Input, VB-Audio Virtual Cable)を選んで処理を開始したところ、「ストリーム開始エラー: Error opening Stream: Illegal combination of I/O devices [PaErrorCode -9993]」が発生し、コア機能(SoloCast入力→処理→仮想マイク出力)が動作しないことが判明した。これはこのLinux開発環境では実オーディオデバイスがないため一度も検出できなかった不具合であり、D-001に記載した既知の制約（Windows実機での動作確認が必要）がまさに顕在化した事例である。
+- PaErrorCode -9993はPortAudioの`paBadIODeviceCombination`に対応する。`app/soloclarity/audio/engine.py`の`AudioEngine.start()`は、`sd.Stream(device=(input_device, output_device), channels=1, callback=self._callback)`という単一の双方向(full-duplex)ストリームで、入力(SoloCast、実ハードウェア)と出力(CABLE Input、VB-Audio製の仮想デバイス)という**別々の物理・仮想デバイス**を結合しようとしていた。WASAPIでは、異なるデバイス同士(特に別クロックドメインを持つデバイス)を1本のフルデュプレックスストリームに結合することは一般的にサポートされておらず、この組み合わせで`paBadIODeviceCombination`が返るのはPortAudio/sounddeviceのよく知られた制約である。
+
+### 決定
+- `AudioEngine`の内部実装を、単一の`sd.Stream`から、独立した`sd.InputStream`(SoloCast側)と`sd.OutputStream`(CABLE Input側)の2本構成に変更する。両ストリームはそれぞれ別デバイス・別クロックで動作するため、小さな有界のリングバッファ(ジッタバッファ)で橋渡しする。
+  - 入力側コールバック: フレームを読み取り、入力メーターを更新し、`chain.process()`(または`bypass`)を実行し、処理後フレームをリングバッファへpushする。バッファが満杯(出力側の消費が追いついていない)の場合は最も古いフレームを破棄して詰まりを回避する。
+  - 出力側コールバック: リングバッファから次のフレームをpopしてそのまま出力する。バッファが空(アンダーラン、起動直後やクロックドリフトで一時的に発生し得る)の場合は無音を出力し、ノイズや未初期化メモリの出力を避ける。
+  - 既存の例外保護(`chain.process()`のtry/except→bypass+`on_error`)・スレッドセーフなエラー伝達の契約は維持する。
+  - `start()`/`stop()`は両ストリームをセットで管理し、一方が開けても他方が失敗した場合は、開いた方を`close()`してから例外を再送出する(D-006で確立した単一ストリームのリーク防止パターンを2ストリームへ拡張する)。
+
+### 理由（検討した代替案）
+- **単一`sd.Stream`のまま設定を調整する案(例: WASAPI排他モード指定等)は不採用**: 異なる物理・仮想デバイスを1本のフルデュプレックスストリームで結合すること自体がPortAudio/WASAPIの一般的な制約であり、設定の調整では根本的に解決しない可能性が高い。実際に多くのsounddeviceベースの「仮想オーディオケーブル」アプリケーションが、入出力デバイスが異なる場合は2本の独立ストリーム+バッファという構成を採用しており、確立された標準的な解決策である。
+- **バッファをブロッキングキュー(`queue.Queue.put`のブロッキング)にする案は不採用**: オーディオコールバックスレッド内でブロッキング待機すると、PortAudioのリアルタイム制約(コールバックは短時間で返る必要がある)に違反し、別種のグリッチ・アンダーラン・場合によってはストリーム自体のエラーを招く。非ブロッキングかつ満杯時は最も古いフレームを破棄する設計とする。
+
+### 影響
+- `app/soloclarity/audio/engine.py`の実装が変更される。既存の`tests/test_engine.py`(単一`sd.Stream`のフェイクを前提にしたテスト)は新しいアーキテクチャに合わせて書き直しが必要。
+- このLinux環境では実デバイスでの動作確認はできないため、新しいリングバッファのロジック(順序保持、満杯時の破棄、空時の無音出力)は合成コールバック呼び出しによるユニットテストで検証する。実際にWindows実機でSoloCast→CABLE Inputの組み合わせが起動できるかは、ユーザーによる再検証が必要。
+- 本Issueは実機フィードバックによって発見された初めての具体的な不具合であり、Windows実機検証の重要性を裏付けている。今後同種の「異なる入出力デバイスの組み合わせ」に起因する問題がないか、`app/WINDOWS_VERIFICATION_CHECKLIST.md`に確認項目として明記する。
+
+### 追記（2026-08-12・実装時に確定した詳細）
+
+- **ジッタバッファサイズ**: `app/soloclarity/audio/engine.py`の`JITTER_BUFFER_FRAMES = 4`(1フレーム=10ms・48kHz・480サンプルのため40ms相当)。決定時に挙げた目安(2〜6フレーム=20〜60ms)の中間値を採用した。バッファ実装は`collections.deque(maxlen=JITTER_BUFFER_FRAMES)`を薄くラップした内部クラス`_FrameRingBuffer`(同ファイル内、新規ファイルは作らない)。`push()`は`deque`の`maxlen`超過時の自動先頭破棄をそのまま利用し、`pop()`は空なら`None`を返す。両方とも`threading.Lock`で保護しているが、クリティカルセクションは`append`/`popleft`のO(1)操作のみであり、PortAudioコールバック内でのブロッキング待機(バッファの空き/データ待ち)は一切行わない。
+- **メーター計測タイミング**: 入力メーター(`in_rms`/`in_peak`)は入力側コールバック(`_input_callback`)で処理直後に測定し、出力メーター(`out_rms`/`out_peak`)は出力側コールバック(`_output_callback`)で実際に書き出す値(アンダーラン時の無音を含む)を測定する設計にした。入力側で両方を測ると、ジッタバッファの空(アンダーラン)でフレームが実際には出力されなかった場合でも「処理はできていた」ことになり、Discord側へ実際に届く音量と表示上のメーターが乖離するため、出力側の実測値を使う方を選んだ。入力メーターの値は`self._last_input_levels`(タプル)経由で出力側コールバックへ橋渡ししている(タプルの再代入はCPythonでは単一のSTORE_ATTR/LOAD_ATTRで完結し部分更新を観測しないため、追加のロックは設けていない)。`tests/test_engine.py::TestMeterMeasuresActualOutput`で、アンダーラン発生時に出力メーターがfloor_db(無音)を反映し、直前の入力レベルへ引きずられないことを確認した。
+- **`start()`の順序**: 入力(`sd.InputStream`)を先に開いてから出力(`sd.OutputStream`)を開く順序にした。出力側の開始が失敗した場合は、開始済みの入力側を`stop()`→`close()`してから例外を再送出する。入力側の開始自体が失敗した場合は、出力側は一切生成されない(`_open_and_start`が入力側の失敗時点で例外を再送出するため)。`tests/test_engine.py::TestStartOpensBothStreamsAndCleansUpOnFailure`の3ケース(両方成功/入力失敗/出力失敗)で、開いた方だけが正しくclose/stopされ、失敗するたびに参照が蓄積しないこと(50回連続失敗のケース)を確認した。
+- **`stop()`**: 入力・出力それぞれ独立した`if`ブロックでstop/close/Noneクリアを行う(D-006の単一ストリーム版と同じ「片方の失敗が他方の後始末をスキップさせない」構造を踏襲)。`tests/test_engine.py::TestStop`で両ストリームが確実にstop/closeされることを確認した。
+
+### 追記（2026-08-13・Reviewer再指摘対応: `start()`/`stop()`の後始末が片方の失敗で連鎖的にスキップされる, Medium, CONFIRMED）
+
+- **指摘内容**: 直上の追記時点の実装は、`start()`(出力側失敗時に入力側を後始末する経路)・`stop()`(入力/出力それぞれの後始末)のいずれも、各ストリームの`.stop()`/`.close()`自体をtry/exceptで囲んでいなかった。そのため(a)`stop()`側で入力ストリームの`.stop()`が例外を送出すると、`.close()`はおろか出力ストリーム側のstop/close/参照クリアも一切実行されない、(b)`start()`側で出力の`.start()`失敗をトリガに入力側を後始末する際、`input_stream.stop()`自体が例外送出すると`input_stream.close()`が呼ばれず、しかも最終的に伝播する例外が入力側の`Pa_StopStream failed`になり、ユーザーへ伝えるべき本来の原因(出力側の`Pa_StartStream failed`)が完全にマスクされる、という2つの実害をReviewerがフェイクストリームで再現した。この時点の本ドキュメントの記述(「片方の失敗が他方の後始末をスキップさせない」)と実装(例外の伝播を止めていない)も不一致だった。
+- **対応**: `AudioEngine`に`_safe_close(stream)`(close()の例外をログに残すだけで伝播させない)・`_safe_stop_and_close(stream)`(stop()を試み、失敗してもログに残すだけで必ず`_safe_close`へ進む)を追加し、`_open_and_start`の失敗時close・`start()`の入力側後始末・`stop()`の入力/出力それぞれの後始末をすべてこの2ヘルパー経由に統一した。ログは標準の`logging`モジュール(`logging.getLogger(__name__)`、新規依存なし)で`logger.exception(...)`により残す。
+  - `start()`: 出力側の`Pa_StartStream`失敗時、入力側の`stop()`/`close()`が失敗しても、伝播する例外は常に出力側の元の失敗理由のまま(`raise`で再送出、cleanup側の例外はログのみに留める)。
+  - `stop()`: 入力・出力それぞれの参照を先にクリアしてから`_safe_stop_and_close`で後始末するため、一方の失敗が他方の後始末をスキップさせることはなく、`stop()`自体も例外を送出しない(呼び出し元`app.py`の`_stop_engine()`/`_on_close()`/`_on_device_changed()`は今回変更不要のまま、途中で止まらず`self.engine = None`まで到達できる)。
+- **テスト**: `tests/test_engine.py`にReviewerの再現方法を踏襲した回帰テストを追加した。`TestStartOpensBothStreamsAndCleansUpOnFailure::test_input_cleanup_stop_failure_does_not_mask_original_output_failure`(出力失敗+入力stop()失敗の組み合わせで、入力の`close()`は実行され、伝播する例外は出力側の`Pa_StartStream failed`のままで`Pa_StopStream`という文字列を含まないこと)、`TestStop::test_input_stream_stop_failure_does_not_skip_output_stream_cleanup`(入力の`stop()`失敗時も出力側のstop/closeが実行され、`stop()`自体は例外を送出しないこと)。
+- **影響**: `pytest tests/`(このLinux環境): **91 passed**(前回89件 + 今回の回帰テスト2件)。`pyflakes soloclarity tests`: 警告0件。`app/WINDOWS_VERIFICATION_CHECKLIST.md`の「7. 遅延の実測」に、ジッタバッファ(最大4フレーム=40ms)による追加遅延が生じ得る旨と、旧バージョンとの体感比較確認項目を追記した(Low, CONFIRMED)。
+
+---
+
+## D-010: プリセット・詳細設定UIの再調整（「小さくて低い声＋高品質ノイズ除去」）
+
+- 日付: 2026-08-12
+- 状態: 採用
+
+### 背景
+- Issue要件: 「小さくて低い声でも明瞭に聞こえること」「高品質なノイズ抑制」を最優先に、既定プリセット「Discord通話」を「小さくて低い声＋高品質ノイズ除去」へ置き換える。詳細設定UIの15スライダーを、専門用語ではなく「上げる/下げるとどうなるか」が分かる日本語表現へ全面的に書き換える。
+- 現状のプリセット4種(`natural`/`low_voice`/`quiet_voice`/`discord_call`)を確認したところ、`低い声`(clarity=strong偏重)と`小さい声`(agc偏重)はそれぞれ別の軸を強調する設計であり、完全な重複はない。ただし両方の性質を併せ持つ「小さくて低い声」という組み合わせに最適化されたプリセットはこれまで存在しなかった。
+- 現状のノイズ除去3段階(`weak`/`standard`/`strong`)は、RNNoiseの適用量(`wet_dry_mix`)とゲートの積極性(`gate_threshold`/`gate_release_ms`)が同じ方向に連動する設計になっており、「ノイズ除去の質(wet_dry_mix)を上げつつ、小さい声を誤って消さない(ゲートは緩やかに)」という今回の目標を、既存の3段階のいずれでも同時に満たせないことが判明した。特に`strong`(wet_dry_mix=1.00, gate_threshold=0.45, gate_release_ms=120ms)は、ノイズ除去量自体は最大だが、ゲート閾値が高く反応も速いため、小さい声・語尾を誤って削る可能性が高い。
+
+### 決定
+
+#### 1. プリセット構成
+既存4プリセットの数は維持しつつ、内部キー`discord_call`を`quiet_low_voice`に、表示名を「Discord通話」から「小さくて低い声＋高品質ノイズ除去」に変更し、これを引き続き既定(`DEFAULT_PRESET`)とする。既存の`config.json`に保存された`preset: "discord_call"`は`_is_valid_preset`で不正値として扱われデフォルト(新キー)へ自動フォールバックするため、移行は自然に行われる(意図的な挙動)。
+
+`quiet_low_voice`のパラメータ:
+- `clarity = "strong"`(既存の強レベルをそのまま使用。120Hz付近を触らず厚みを残しつつ200/300Hzのこもりを削り、2〜4kHzで子音を持ち上げる設計は今回の目標と一致するため変更不要)
+- `noise = "strong"`(ただし下記の通り`strong`段階自体の値を再調整する)
+- `compressor = CompressorParams(threshold_db=-23.0, ratio=2.8, attack_ms=10.0, release_ms=200.0)`(`low_voice`と`quiet_voice`の中間、小さい声を早めに拾いつつ`quiet_voice`よりわずかに緩やかにして不自然な潰れを避ける)
+- `agc = AgcParams(target_dbfs=-17.0, max_gain_db=12.0)`(target値は旧`discord_call`を踏襲、max_gainは`quiet_voice`と同じ12dBまで持ち上げ可能にする)
+
+`natural`/`low_voice`/`quiet_voice`は既存のまま維持する(それぞれ「ほぼ無加工」「低い声のみに最適化(小さくない声向け)」「小さい声のみに最適化(低くない声向け)」という独立したユースケースを持ち、新プリセットとの完全な重複はないと判断)。
+
+#### 2. ノイズ除去3段階(`NOISE_STAGES`)の再調整
+RNNoise適用量(除去の質)とゲートの積極性(声を消さない)を分離する方向で、3段階すべてを見直す。
+
+| 段階 | wet_dry_mix (旧→新) | gate_threshold (旧→新) | gate_release_ms (旧→新) |
+|---|---|---|---|
+| weak | 0.30→0.30(変更なし) | 0.15→0.12 | 300→350 |
+| standard | 0.70→0.78 | 0.30→0.20 | 200→250 |
+| strong | 1.00→1.00(変更なし) | 0.45→0.25 | 120→200 |
+
+方針: `wet_dry_mix`(除去の質)は据え置き〜微増し、`gate_threshold`/`gate_release_ms`(声を誤って消さないための余裕)は全段階で緩める。「ノイズ除去は強くしても、声を消しにくくする」という今回の要件は特定のプリセット固有ではなく全ユーザーに関わる一般改善のため、段階自体を調整することにした(新プリセット専用の4段階目を追加する案は、基本画面の「ノイズ除去」ドロップダウンが全プリセット共通の3段階である現状の一貫性を崩すため不採用)。
+
+#### 3. 詳細設定UI: 15スライダーの日本語ラベル・説明・目安表現
+`app/soloclarity/gui/app.py`の`ADVANCED_SLIDER_SPECS`を、(キー, ラベル, 最小, 最大, 刻み)に加えて説明文・両端の目安ラベルを持つ形へ拡張する。以下の表がラベル・説明・目安(最小側→最大側)の確定値。Developerはこの表の文言をそのまま使うこと(表現の意図は方向性の正確さを含めて確認済みのため、独自の言い換えはしないこと)。
+
+| キー | ラベル | 説明 | 目安(最小→最大) |
+|---|---|---|---|
+| clarity_highpass_hz | 低い雑音をカットする | 上げるほど、机の振動音や部屋の低い音を減らします。上げすぎると声の低さまで一緒に削れることがあります。 | 低音を残す → 低音をカット |
+| clarity_200hz_gain_db | 声のこもりを減らす(低め) | 下げるほどこもりが減ります。下げすぎると声が薄く感じることがあります。 | こもり軽減 → 厚み重視 |
+| clarity_300hz_gain_db | 声のこもりを減らす(中低め) | 下げるほどこもりが減ります。下げすぎると声が薄く感じることがあります。 | こもり軽減 → 厚み重視 |
+| clarity_2000hz_gain_db | 発音をはっきりさせる(低め) | 上げるほど発音がはっきりします。上げすぎると声が硬く感じることがあります。 | やわらか → はっきり |
+| clarity_3000hz_gain_db | 発音をはっきりさせる(中) | 上げるほど発音がはっきりします。上げすぎると声が硬く感じることがあります。 | やわらか → はっきり |
+| clarity_4000hz_gain_db | 発音をはっきりさせる(高め) | 上げるほど発音がはっきりします。上げすぎると声が硬く、またはサ行が刺さる感じになることがあります。 | やわらか → はっきり |
+| noise_wet_dry_mix | 周囲の音を減らす | 上げるほど周囲の雑音が減ります。上げすぎると声が不自然になることがあります。 | 自然さ重視 → 除去重視 |
+| noise_gate_threshold | 無音時の雑音を抑える | 上げるほど小さな雑音を消します。上げすぎると小さい声まで消えることがあります。 | 残す → 消す |
+| noise_gate_release_ms | 声が終わった後の消え方 | 上げるほど声の余韻がゆっくり自然に消えます。下げすぎると声の語尾が急に切れることがあります。 | サッと消える → ゆっくり消える |
+| compressor_threshold_db | 音量差を整える(効き始め) | 下げるほど、小さい声にも早く効果がかかります。下げすぎると常に効果がかかった不自然な声になることがあります。 | 効きにくい → 効きやすい |
+| compressor_ratio | 音量差を整える(強さ) | 上げるほど、声の大小の差が小さくなります。上げすぎると声が不自然に潰れて聞こえることがあります。 | ゆるやか → 強力 |
+| compressor_attack_ms | 音量差を整える(反応の速さ) | 下げるほど、大きな声にすぐ反応します。下げすぎると声の出始めが不自然にへこむことがあります。 | 素早く反応 → ゆっくり反応 |
+| compressor_release_ms | 音量差を整える(戻る速さ) | 下げるほど、効果からすぐ元の音量に戻ります。下げすぎると音量の変化がせわしなく感じ、上げすぎると次の声まで音量が低いままになることがあります。 | 素早く戻る → ゆっくり戻る |
+| agc_target_dbfs | 小さい声を持ち上げる(目標の大きさ) | 上げるほど声がしっかり届く大きさになります。上げすぎると無音時のノイズが目立つことがあります。 | 控えめ → しっかり持ち上げる |
+| agc_max_gain_db | 小さい声を持ち上げる(最大の強さ) | 上げるほど、とても小さい声も持ち上げられます。上げすぎると無音時のノイズが目立つことがあります。 | 控えめ → 最大まで持ち上げる |
+
+両端の目安ラベルは各スライダーの左右(最小値側/最大値側)に小さく表示する。既存の`tk.Scale`自体が視覚的なつまみ位置を示すため、追加のグラフィック要素は作らず、テキストラベルのみで十分とする(過剰な視覚化はしない)。
+
+#### 4. 基本画面の「明瞭度」「ノイズ除去」ドロップダウン
+現状、`presets.CLARITY_LEVELS`/`NOISE_LEVELS`の内部キー(`weak`/`standard`/`strong`)がそのままコンボボックスに表示されており、日本語UIの中に英単語が混在している。`弱`/`標準`/`強`という表示用ラベルへの対応表を追加し、他の日本語UIと一貫させる(プリセットの`label_ja`と同じ「内部キー⇔表示名」パターンを踏襲する)。
+
+### 理由（検討した代替案）
+- **新プリセット専用のノイズ除去4段階目を追加する案は不採用**: 基本画面の「ノイズ除去」ドロップダウンは全プリセット共通の3段階という一貫したメンタルモデルを既に確立しており、特定プリセットのみ4段階目が現れる設計は「設定項目を増やさない」というIssueの方針、およびAGENTS.mdの「機能追加を目的に複雑化させない」に反する。3段階自体を再調整する方が影響範囲が明確で、全ユーザーに一般的な改善として届く。
+- **`natural`/`low_voice`/`quiet_voice`を統合・削除する案は不採用**: 「小さくて低い声」以外の単一条件(低いだけ、小さいだけ)に最適化したいユーザーのユースケースが残っており、Issueも「必要であれば整理してよい」という任意の許可であって削除を必須としていない。重複がないことを確認した上で維持する判断とした。
+- **詳細設定のパラメータ数を減らす(例: コンプレッサー4項目を1項目に統合)案は不採用**: Issoの要求は「専門用語を分かりやすい日本語にする」ことであり、パラメータの技術的な粒度(数)自体を変える指示ではない。統合は`VoiceChain`側のマッピングロジックを追加する必要があり、要求されていない複雑化になる。
+
+### 影響
+- 既存の`config.json`に保存された`advanced_overrides`のキー名(`clarity_200hz_gain_db`等)はプログラム側の識別子のまま変更しないため、既存ユーザーの詳細設定保存値に影響はない(表示ラベルのみの変更)。
+- `preset: "discord_call"`を保存済みのユーザーは、次回起動時に自動的に新デフォルト(`quiet_low_voice`)へフォールバックする。
+- ノイズ除去3段階の再調整により、既存の`tests/test_gate.py`等の期待値(閾値・release_ms)を使ったテストは新しい数値に合わせて更新が必要。
+
+---
+
+## D-011: T-005実装（D-010の確定表をそのまま実装、9条件の合成信号テスト）
+
+- 日付: 2026-08-13
+- 状態: 採用
+
+### 背景
+- T-005はManager(D-010)が確定した数値・文言をそのまま実装するタスクであり、Developer側での言い換え・再設計は行わない指示だった。本エントリはD-010の表を実装した際の実装詳細と、Issueが要求する9つの想定利用シーンに対する自動テストの実測結果を記録する。
+- 本セッションもLinuxのクラウドコンテナであり、D-001記載の制約（Windows実機・Discordクライアント・実オーディオデバイスなし）は変わらない。以下の実測値はすべてこの環境のpytest自動テスト・合成信号によるDSP検証・xvfb環境でのGUI構造検証によるものであり、「実際に聞いて確認した」という主張は一切含まない。
+
+### 決定
+
+#### 1. プリセット再構成
+`app/soloclarity/presets.py`の`discord_call`キーを`quiet_low_voice`に変更し、D-010の表どおりのパラメータ(`clarity="strong"`, `noise="strong"`, `compressor=CompressorParams(-23.0, 2.8, 10.0, 200.0)`, `agc=AgcParams(target_dbfs=-17.0, max_gain_db=12.0)`)を設定した。`DEFAULT_PRESET`・`PRESET_ORDER`も新キー名に更新した。`natural`/`low_voice`/`quiet_voice`は無変更。
+
+#### 2. ノイズ除去3段階の再調整
+`NOISE_STAGES`をD-010の表どおりに変更した(weak: gate_threshold 0.15→0.12, gate_release_ms 300→350。standard: wet_dry_mix 0.70→0.78, gate_threshold 0.30→0.20, gate_release_ms 200→250。strong: gate_threshold 0.45→0.25, gate_release_ms 120→200。wet_dry_mixのweak/strongは据え置き)。既存の`tests/test_chain.py`・`tests/soak_chain.py`・`tests/bench_chain.py`内の`"discord_call"`をすべて`"quiet_low_voice"`へ置き換えた。`tests/test_gate.py`は`presets.NOISE_STAGES[level]`経由で値を動的に参照する設計のため、コード自体の変更は不要だった(ハードコードされた閾値なし)。`tests/test_chain.py`内の1箇所、コメントで「ゲート閾値0.30」と旧standard値を参照していた箇所を「ゲート閾値0.20」に修正した(アサーション自体は数値非依存だったため実害はないが、コメントの正確性のため修正)。
+
+#### 3. 詳細設定UIの日本語化
+`app/soloclarity/gui/app.py`の`ADVANCED_SLIDER_SPECS`を`tuple[tuple[str, str, float, float, float], ...]`から`SliderSpec`(NamedTuple、`key`/`label`/`lo`/`hi`/`resolution`/`description`/`hint_low`/`hint_high`)のタプルへ拡張し、D-010の表の文言(ラベル・説明・両端目安)をそのまま埋め込んだ(意訳・言い換えなし)。`_build_advanced_panel`を、各スライダーにつき2行(ラベル+左目安+スケール+右目安の行、その下に説明文の行)を割り当てる構成に変更した。説明・目安ラベルは`ttk.Label`に`font=("TkDefaultFont", 8)`(説明文はさらに`foreground="gray"`、`wraplength=420`)を指定し、過剰なグラフィック要素は追加していない(D-010「テキストラベルのみで十分」の方針どおり)。既存の`_ADVANCED_SLIDER_RANGES`(クランプ用)・`_clamp`関数・`advanced_overrides`のキー名(内部識別子)は無変更。`tests/test_app_gui.py`の`ADVANCED_SLIDER_SPECS`の5要素タプル分解を`spec.key`/`spec.lo`/`spec.hi`属性アクセスへ更新した。
+
+#### 4. 基本画面ドロップダウンの日本語化
+`presets.py`に`LEVEL_LABELS_JA = {"weak": "弱", "standard": "標準", "strong": "強"}`を追加した(明瞭度・ノイズ除去は同じキー集合のため対応表を1つに共通化)。`app.py`の`clarity_combo`/`noise_combo`の`values`をこの対応表経由の表示名にし、`_restore_from_config`/`_on_preset_selected`での`clarity_var.set()`/`noise_var.set()`、`_on_clarity_selected`/`_on_noise_selected`での逆引き(表示名→内部キー)も、既存の`preset_label_to_name`パターンを踏襲して実装した。内部キー(`weak`/`standard`/`strong`)・config.jsonとの整合性は変更していない(表示層のみの変更)。
+
+#### 5. 9条件の合成信号テスト
+`tests/test_chain.py`に`TestQuietLowVoicePresetRealWorldScenarios`(9メソッド)を追加した。既存の`make_low_voice_signal`(基本周波数+倍音の合成、f0パラメータで音域を可変)・`band_energy`(FFTでの帯域エネルギー比較)・`chain_factory`フィクスチャをそのまま踏襲した。
+
+実測結果(このLinux環境、`pytest tests/test_chain.py -k TestQuietLowVoicePresetRealWorldScenarios -q`、9 passed):
+
+1. **小さい＋低い声**(peak -32dBFS, f0=110Hz): AGC内部ゲインが80フレーム処理後に初期値1.0から約1.113(+0.9dB相当)まで増加する方向に働くことを確認。EQ単体(Highpass+PeakFilter)では200-300Hz帯エネルギーが減少、2-4kHz帯エネルギーが増加することを確認。
+2. **普通の声量＋低い声**(peak -11dBFS, f0=120Hz): 80フレーム処理後もリミッターceiling(線形0.891)を一度も超えず(実測peak 0.820)、AGCゲインは1.089(+0.7dB)止まりで、閾値として設定した1.5倍(+3.5dB)を大きく下回ることを確認(既にちょうど良い音量の声を不自然に大きくしすぎない)。
+3. **小さい声＋通常の音域**(peak -32dBFS, f0=220Hz): AGCゲインが1.0から約1.163まで増加することを確認。
+4. **普通の声量(基準ケース)**(peak -18dBFS, f0=220Hz): 起動直後15フレーム(150ms)のウォームアップを除いた区間で、出力RMS比0.34・出力ピーク比0.59倍が、常識的な範囲として設定した0.1〜10倍の範囲に収まることを確認。ピークはリミッターceilingを一度も超えないことも確認。
+5. **突然大きな声**: フルチェーン(振幅0.05→0.999の急変)でリミッターceilingを一度も超えないこと(既存の`TestCompressorAgcLimiter`と同じ手法)、およびコンプレッサー単体(RNNoise/ゲートの合成音特有の揺らぎを排除、既存`TestCompressorSmoothness`と同じ手法)で出力側のdB/frame最大変化量(19.16dB)が入力側(20.0dB)を上回らないことを確認。
+6. **無音状態**: 振幅0.002のガウスノイズ(ほぼ無音)200フレームに対し、出力エネルギーが入力エネルギーの0.05倍未満(実測比率約0.00015)に減衰することを確認。
+7. **PCファン等の連続ノイズ**: 振幅0.05のホワイトノイズ300フレームに対し、出力エネルギーが入力エネルギーの0.1倍未満(実測比率約0.0019)に減衰することを確認。
+8. **キーボード/マウス等の断続的ノイズ**: 200フレーム中20フレームに5サンプルの鋭いパルス(振幅0.3〜0.6)を混ぜた合成音で、クリック区間の出力エネルギーが入力エネルギーの0.1倍未満(実測比率約0.00013)に抑制され、かつ処理全体が例外なく完走することを確認。
+9. **声とノイズが同時に存在する状態**(声: peak -20dBFS, f0=150Hz + 定常ノイズ振幅0.03、ノイズ系列はnoise-only側と同一の乱数シードで再現して条件を揃えた): 声+ノイズ区間の出力エネルギーが、同一ノイズ単独区間の出力エネルギーの10倍を上回る(実測比率約2485倍)ことを確認。新しいgate_threshold(strong: 0.45→0.25)が緩和されたことで、声がノイズに埋もれてもゲートで丸ごと消されないことを裏付ける、9条件のうち最も重要な検証。
+
+いずれもRNNoiseが完全に周期的な合成音を数十フレーム後に「非音声寄り」と判定していく既知の挙動(D-002)を踏まえ、AGCゲインの方向性検証はn_frames=80のうち発話確率が閾値を上回る前半区間を含む形にし、条件4のRMS/ピーク比較はウォームアップ区間を除いた上で桁単位の広い許容範囲(0.1〜10倍)を設定することで、実装のバグではなく合成テスト信号特有の揺らぎによる誤検出を避けた。
+
+### 理由
+- D-010で数値・文言が確定済みのため、Developer側の判断は「実装方法」(データ構造の選び方、テスト設計)のみに限定した。判定ラダーに従い、`ADVANCED_SLIDER_SPECS`の拡張は新規ファイル・新規抽象化を増やさずNamedTupleへの置き換えのみで対応した。
+- 9条件のテストは、既存の合成信号パターン(`make_low_voice_signal`・`band_energy`・compressor board単体でのdB jump比較・RNNoiseラッパーの定常ノイズ減衰確認)をすべて踏襲し、新しいヘルパー関数やテストファイルを追加していない(既存パターンの再利用を優先)。
+
+### 影響
+- `pytest tests/`(このLinux環境): **100 passed**(D-009時点の91件 + 今回の新規9件)。5回連続実行でフレーキーな失敗なし。
+- `pyflakes soloclarity tests`: 警告0件。
+- 既存の`config.json`に保存された`preset: "discord_call"`は、`_is_valid_preset`により不正値としてデフォルト(新キー`quiet_low_voice`)へ自動フォールバックする(D-010で意図された挙動)。`advanced_overrides`のキー名(`clarity_200hz_gain_db`等)は無変更のため、詳細設定の保存値には影響しない。
+- xvfb環境で`App()`を起動し、詳細設定パネルを開いた状態で`_advanced_frame.winfo_children()`が75個(15スライダー×5ウィジェット: ラベル/左目安/スケール/右目安/説明)であること、プリセット・明瞭度・ノイズ除去のコンボボックスがそれぞれ日本語表示(`小さくて低い声＋高品質ノイズ除去`/`弱`/`標準`/`強`等)になっていることをクラッシュなしで確認した。
+- Windows実機・Discordでの実際の聞こえ方の確認は、この環境では引き続き実施不可能(D-001の既知の制約)。`app/WINDOWS_VERIFICATION_CHECKLIST.md`のプリセット名表記(「Discord通話」→「小さくて低い声＋高品質ノイズ除去」)も本タスクで合わせて更新した。

@@ -19,6 +19,85 @@
 
 ---
 
+## 2026-08-13 T-004・T-005完了、version 1.1.0確定
+
+### 実施内容
+- Reviewerが両タスクとも承認(T-004: Medium/Low指摘とも解消CONFIRMED、T-005: D-010との数値・文言一致、9条件テストの妥当性等をすべてCONFIRMED)したことを受け、`docs/tasks.md`のT-004・T-005を完了に更新した。
+- `app/soloclarity/__init__.py`の`__version__`を`1.0.0`→`1.1.0`へ変更(D-008で確立したバージョニング方針を踏襲。T-004はバグ修正、T-005はプリセット構成・UI文言というユーザー向け機能変更のため、パッチではなくマイナーバージョンを上げる判断)。
+- コミット・プッシュ後、PRを作成しGitHub Actions(windows-latest)でのビルド成功を確認する(次回開始位置参照)。
+
+### 結果
+- このLinux環境での最終確認: `pytest tests/` 100 passed、`pyflakes soloclarity tests` 警告0件。
+- T-004: AudioEngineの二重ストリーム構成+クリーンアップ強化により、実機報告のあったPaErrorCode -9993の原因(異なるデバイスを単一の双方向ストリームで結合)をコードレベルで解消。Reviewer所見「原因を論理的に取り除く変更」。
+- T-005: 既定プリセットを「小さくて低い声＋高品質ノイズ除去」(`quiet_low_voice`)へ置き換え、ノイズ除去3段階を除去品質維持・ゲート緩和の方向で再調整、詳細設定15項目を分かりやすい日本語表現へ全面改訂。Reviewerが独自の合成信号(ファン音風の定常ノイズ)で、ゲート緩和後も定常ノイズ抑制比が99.8%以上を維持していることを確認済み。
+- Windows実機・Discordでの実際の聞こえ方(特に今回変更したノイズ抑制・プリセットの主観評価)は、このLinux環境では引き続き検証不可能。`app/WINDOWS_VERIFICATION_CHECKLIST.md`に沿ったユーザー側での確認が必要。
+
+### 次回開始位置
+- GitHub ActionsのCI実行結果を確認し、成功していればPRをマージして最終Artifact(`SoloClarity-v1.1.0-{ビルド日}`)のダウンロードリンクをユーザーへ案内する。
+
+---
+
+## 2026-08-13 T-005 実装完了(プリセット・詳細設定UIの再調整)
+
+### 実施内容
+- docs/decisions.md D-010(Manager確定表)の内容をそのまま実装した(独自の言い換え・再設計はしていない)。詳細はD-011参照。
+  1. `app/soloclarity/presets.py`: `discord_call`→`quiet_low_voice`へキー変更、D-010の表どおりのパラメータ(clarity=strong, noise=strong, compressor/agc値)に変更。`DEFAULT_PRESET`/`PRESET_ORDER`も更新。`natural`/`low_voice`/`quiet_voice`は無変更。
+  2. `NOISE_STAGES`をD-010の表どおりに再調整(weak/standard/strongのgate_threshold・gate_release_ms、standardのwet_dry_mixのみ変更)。`tests/test_chain.py`・`tests/soak_chain.py`・`tests/bench_chain.py`内の`"discord_call"`をすべて`"quiet_low_voice"`へ置き換えた。`tests/test_gate.py`は`presets.NOISE_STAGES`経由で値を動的参照する設計のためコード変更不要だった。
+  3. `app/soloclarity/gui/app.py`の`ADVANCED_SLIDER_SPECS`を`SliderSpec`(NamedTuple)へ拡張し、D-010の説明文・目安ラベルをそのまま埋め込んだ。`_build_advanced_panel`を、ラベル+左右目安+スケールの行と、その下の説明文の行という2行構成に変更。既存の`_ADVANCED_SLIDER_RANGES`/`_clamp`/config.jsonキー名は無変更。
+  4. `presets.py`に`LEVEL_LABELS_JA`(弱/標準/強)を追加し、`app.py`の明瞭度・ノイズ除去コンボボックスを日本語表示化。既存の`preset_label_to_name`パターンを踏襲した逆引きで内部キーへ変換。
+  5. `tests/test_chain.py`に`TestQuietLowVoicePresetRealWorldScenarios`(9メソッド、Issueが挙げた9つの想定利用シーンに対応)を追加した。
+
+### 結果
+- `pytest tests/`(このLinux環境): **100 passed**(T-004時点の91件 + 今回の新規9件)。5回連続実行でフレーキーな失敗なし。
+- `pyflakes soloclarity tests`: 警告0件。
+- xvfb環境で`App()`を起動し、詳細設定パネル(75ウィジェット=15スライダー×5)・プリセット/明瞭度/ノイズ除去の日本語コンボボックス表示がクラッシュなしで動作することを確認した。
+- 9条件テストの実測値はdocs/decisions.md D-011に記録した。実際に聞いて確認したものではなく、この環境で実行できる自動テスト・合成信号による検証結果のみ。
+- `app/WINDOWS_VERIFICATION_CHECKLIST.md`のプリセット名表記(「Discord通話」→新しい表示名)も合わせて更新した。
+
+### 次回開始位置
+- Reviewerによる敵対的検証を受ける(T-005を「レビュー中」に更新済み)。承認後、コミット。Windows実機でのプリセット・詳細設定表示の最終確認は引き続きユーザー側の作業として残る。
+
+---
+
+## 2026-08-13 T-004 Reviewer指摘対応(Medium1件, Low1件)
+
+### 実施内容
+- 別セッションのReviewerによるT-004実装(コミットa57977f)への敵対的検証で、Medium(CONFIRMED)1件・Low(CONFIRMED)1件の指摘を受け対応した。
+- **Medium**: `app/soloclarity/audio/engine.py`の`start()`(出力側失敗時の入力側後始末)・`stop()`(入力/出力それぞれの後始末)が、各ストリームの`stop()`/`close()`自体をtry/exceptで囲んでおらず、片方が例外を送出すると後始末が連鎖的にスキップされる(stop()側: 出力側のstop/closeが一切実行されない。start()側: 入力側close()がスキップされ、しかも本来伝えるべき出力側の`Pa_StartStream`失敗理由が入力側の`Pa_StopStream`失敗でマスクされる)問題を修正した。`_safe_close`/`_safe_stop_and_close`という2つのヘルパー(標準`logging`でログに残すだけで例外を伝播させない)を追加し、`_open_and_start`の失敗時close・`start()`の入力側後始末・`stop()`の両ストリーム後始末をすべてこの経由に統一した。
+- **Low**: `app/WINDOWS_VERIFICATION_CHECKLIST.md`の「7. 遅延の実測」に、ジッタバッファ(最大4フレーム=40ms)による追加遅延の可能性と、旧バージョンとの体感比較確認項目を追記した。
+- `app/tests/test_engine.py`に、Reviewerが使ったのと同様の「stop()自体が例外を送出するフェイクストリーム」による回帰テストをstart()側・stop()側の両方に追加した(`_FakeStream`に`stop_should_fail`/`close_should_fail`オプションを追加)。
+- `docs/decisions.md` D-009に今回の修正内容を追記し、記述と実装の食い違いを解消した。
+
+### 結果
+- このLinux環境: `pytest tests/` **91 passed**(前回89件 + 今回の回帰テスト2件)。`pyflakes soloclarity tests` 警告0件。
+- Windows実機での動作確認は本セッションでは未実施(D-001の既知の制約)。
+
+### 次回開始位置
+- Reviewerによる再検証を受ける(T-004を「レビュー中」に更新済み)。承認後、コミット・GitHub Actions(windows-latest)でのビルド確認、ユーザーへ新しいexeでの実機再検証を依頼する。
+
+---
+
+## 2026-08-12 T-004 実装完了(AudioEngineをInputStream/OutputStream+リングバッファへ書き直し)
+
+### 実施内容
+- D-009の決定に従い、`app/soloclarity/audio/engine.py`の`AudioEngine`を、単一の双方向`sd.Stream`から、独立した`sd.InputStream`(SoloCast側)と`sd.OutputStream`(CABLE Input側)を有界リングバッファ(ジッタバッファ、`_FrameRingBuffer`、`collections.deque(maxlen=4)`)で橋渡しする構成へ書き直した。
+  - `_input_callback`: フレーム読み取り→入力メーター更新→`chain.process()`(例外時はbypass+`on_error`、既存契約を維持)→リングバッファへ非ブロッキングpush(満杯時は最古を自動破棄)。
+  - `_output_callback`: リングバッファから非ブロッキングpop、空ならゼロ埋めの無音を出力。出力メーターは実際に書き出す値(アンダーラン時の無音を含む)を測定する設計にした(理由はD-009追記参照)。
+  - `start()`: 入力ストリームを先に開始し、出力ストリームの開始に失敗した場合は入力側をstop/closeしてから例外を再送出(D-006のリーク防止パターンを2ストリームへ拡張)。入力側自体の開始が失敗した場合は出力側を一切生成しない。
+  - `stop()`: 入力・出力を独立したブロックでstop/close/参照クリアする。`is_running()`は両方の参照が非Noneであることを条件にした(意味は維持)。
+  - `record_and_process_preview`/`play_preview`(テスト再生ボタン用)は変更対象外のため無変更。GUI(`app.py`)側のAudioEngine呼び出しインターフェース(コンストラクタ引数、`bypass`/`start()`/`stop()`/`is_running()`)も無変更。
+- `app/tests/test_engine.py`を新アーキテクチャに合わせて全面的に書き直した。既存の例外保護(bypass+on_error)テストを`_input_callback`/`_output_callback`の組み合わせへ移植した上で、リングバッファの順序保持・満杯時の破棄・空時の無音出力、出力側メーターがアンダーラン時に入力レベルへ引きずられないこと、`start()`の3パターン(両成功/入力失敗/出力失敗)でのリーク防止・後始末、`stop()`の両ストリーム後始末を新規に追加した。
+
+### 結果
+- このLinux環境: `pytest tests/` **89 passed**(D-007時点の82件 + 今回のtest_engine.py書き直しによる純増7件)。`pyflakes soloclarity tests` 警告0件。
+- 実オーディオデバイス・Windows実機での動作確認はこの環境では実施不可能(D-001の既知の制約)。「動作確認した」とは主張せず、上記の自動テスト結果のみを記録する。SoloCast→CABLE Inputの組み合わせで実際にストリームが開けるかは、ユーザーによるWindows実機での再検証が必要。
+- `docs/decisions.md` D-009に、ジッタバッファサイズ(4フレーム=40ms)・メーター計測タイミング(出力側で実測)・`start()`/`stop()`の実装詳細を追記した。
+
+### 次回開始位置
+- Reviewerによる敵対的検証を受ける(T-004を「レビュー中」に更新済み)。承認後、コミット・GitHub Actions(windows-latest)でのビルド確認、ユーザーへ新しいexeでの実機再検証を依頼する。
+
+---
+
 ## 2026-08-12 T-003 完了(version 1.0.0確定・最終ビルド)
 
 ### 実施内容

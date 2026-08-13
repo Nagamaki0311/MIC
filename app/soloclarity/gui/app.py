@@ -11,7 +11,7 @@ import threading
 import time
 import tkinter as tk
 from tkinter import messagebox, ttk
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from soloclarity import __version__, presets
 from soloclarity.audio import devices as device_lib
@@ -27,30 +27,183 @@ TEST_THREAD_JOIN_TIMEOUT_SECONDS = TEST_PREVIEW_SECONDS * 2 + 5.0
 # `_on_close`がworker threadの完了を待つ間、self.update()を呼ぶ間隔。
 TEST_THREAD_POLL_INTERVAL_SECONDS = 0.01
 
-# 詳細設定スライダーの定義: (キー, ラベル, 最小, 最大, 刻み)
-ADVANCED_SLIDER_SPECS: tuple[tuple[str, str, float, float, float], ...] = (
-    ("clarity_highpass_hz", "Highpass (Hz)", 40.0, 150.0, 1.0),
-    ("clarity_200hz_gain_db", "200Hz Gain (dB)", -6.0, 3.0, 0.1),
-    ("clarity_300hz_gain_db", "300Hz Gain (dB)", -6.0, 3.0, 0.1),
-    ("clarity_2000hz_gain_db", "2kHz Gain (dB)", -3.0, 6.0, 0.1),
-    ("clarity_3000hz_gain_db", "3kHz Gain (dB)", -3.0, 6.0, 0.1),
-    ("clarity_4000hz_gain_db", "4kHz Gain (dB)", -3.0, 6.0, 0.1),
-    ("noise_wet_dry_mix", "ノイズ除去 Mix (0-1)", 0.0, 1.0, 0.01),
-    ("noise_gate_threshold", "ゲート閾値 (0-1)", 0.0, 1.0, 0.01),
-    ("noise_gate_release_ms", "ゲート Release (ms)", 50.0, 500.0, 1.0),
-    ("compressor_threshold_db", "Comp Threshold (dB)", -40.0, 0.0, 0.5),
-    ("compressor_ratio", "Comp Ratio", 1.0, 10.0, 0.1),
-    ("compressor_attack_ms", "Comp Attack (ms)", 1.0, 50.0, 1.0),
-    ("compressor_release_ms", "Comp Release (ms)", 50.0, 500.0, 1.0),
-    ("agc_target_dbfs", "AGC Target (dBFS)", -30.0, -6.0, 0.5),
-    ("agc_max_gain_db", "AGC Max Gain (dB)", 0.0, 24.0, 0.5),
+class SliderSpec(NamedTuple):
+    """詳細設定スライダー1項目の定義。
+
+    ラベル・説明・目安(hint_low/hint_high)の文言はdocs/decisions.md D-010の
+    確定表をそのまま使う(意訳・言い換えをしない)。
+    """
+
+    key: str
+    label: str
+    lo: float
+    hi: float
+    resolution: float
+    description: str
+    hint_low: str
+    hint_high: str
+
+
+# 詳細設定スライダーの定義。文言・数値はD-010の表そのもの。
+ADVANCED_SLIDER_SPECS: tuple[SliderSpec, ...] = (
+    SliderSpec(
+        "clarity_highpass_hz",
+        "低い雑音をカットする",
+        40.0,
+        150.0,
+        1.0,
+        "上げるほど、机の振動音や部屋の低い音を減らします。上げすぎると声の低さまで一緒に削れることがあります。",
+        "低音を残す",
+        "低音をカット",
+    ),
+    SliderSpec(
+        "clarity_200hz_gain_db",
+        "声のこもりを減らす(低め)",
+        -6.0,
+        3.0,
+        0.1,
+        "下げるほどこもりが減ります。下げすぎると声が薄く感じることがあります。",
+        "こもり軽減",
+        "厚み重視",
+    ),
+    SliderSpec(
+        "clarity_300hz_gain_db",
+        "声のこもりを減らす(中低め)",
+        -6.0,
+        3.0,
+        0.1,
+        "下げるほどこもりが減ります。下げすぎると声が薄く感じることがあります。",
+        "こもり軽減",
+        "厚み重視",
+    ),
+    SliderSpec(
+        "clarity_2000hz_gain_db",
+        "発音をはっきりさせる(低め)",
+        -3.0,
+        6.0,
+        0.1,
+        "上げるほど発音がはっきりします。上げすぎると声が硬く感じることがあります。",
+        "やわらか",
+        "はっきり",
+    ),
+    SliderSpec(
+        "clarity_3000hz_gain_db",
+        "発音をはっきりさせる(中)",
+        -3.0,
+        6.0,
+        0.1,
+        "上げるほど発音がはっきりします。上げすぎると声が硬く感じることがあります。",
+        "やわらか",
+        "はっきり",
+    ),
+    SliderSpec(
+        "clarity_4000hz_gain_db",
+        "発音をはっきりさせる(高め)",
+        -3.0,
+        6.0,
+        0.1,
+        "上げるほど発音がはっきりします。上げすぎると声が硬く、またはサ行が刺さる感じになることがあります。",
+        "やわらか",
+        "はっきり",
+    ),
+    SliderSpec(
+        "noise_wet_dry_mix",
+        "周囲の音を減らす",
+        0.0,
+        1.0,
+        0.01,
+        "上げるほど周囲の雑音が減ります。上げすぎると声が不自然になることがあります。",
+        "自然さ重視",
+        "除去重視",
+    ),
+    SliderSpec(
+        "noise_gate_threshold",
+        "無音時の雑音を抑える",
+        0.0,
+        1.0,
+        0.01,
+        "上げるほど小さな雑音を消します。上げすぎると小さい声まで消えることがあります。",
+        "残す",
+        "消す",
+    ),
+    SliderSpec(
+        "noise_gate_release_ms",
+        "声が終わった後の消え方",
+        50.0,
+        500.0,
+        1.0,
+        "上げるほど声の余韻がゆっくり自然に消えます。下げすぎると声の語尾が急に切れることがあります。",
+        "サッと消える",
+        "ゆっくり消える",
+    ),
+    SliderSpec(
+        "compressor_threshold_db",
+        "音量差を整える(効き始め)",
+        -40.0,
+        0.0,
+        0.5,
+        "下げるほど、小さい声にも早く効果がかかります。下げすぎると常に効果がかかった不自然な声になることがあります。",
+        "効きにくい",
+        "効きやすい",
+    ),
+    SliderSpec(
+        "compressor_ratio",
+        "音量差を整える(強さ)",
+        1.0,
+        10.0,
+        0.1,
+        "上げるほど、声の大小の差が小さくなります。上げすぎると声が不自然に潰れて聞こえることがあります。",
+        "ゆるやか",
+        "強力",
+    ),
+    SliderSpec(
+        "compressor_attack_ms",
+        "音量差を整える(反応の速さ)",
+        1.0,
+        50.0,
+        1.0,
+        "下げるほど、大きな声にすぐ反応します。下げすぎると声の出始めが不自然にへこむことがあります。",
+        "素早く反応",
+        "ゆっくり反応",
+    ),
+    SliderSpec(
+        "compressor_release_ms",
+        "音量差を整える(戻る速さ)",
+        50.0,
+        500.0,
+        1.0,
+        "下げるほど、効果からすぐ元の音量に戻ります。下げすぎると音量の変化がせわしなく感じ、"
+        "上げすぎると次の声まで音量が低いままになることがあります。",
+        "素早く戻る",
+        "ゆっくり戻る",
+    ),
+    SliderSpec(
+        "agc_target_dbfs",
+        "小さい声を持ち上げる(目標の大きさ)",
+        -30.0,
+        -6.0,
+        0.5,
+        "上げるほど声がしっかり届く大きさになります。上げすぎると無音時のノイズが目立つことがあります。",
+        "控えめ",
+        "しっかり持ち上げる",
+    ),
+    SliderSpec(
+        "agc_max_gain_db",
+        "小さい声を持ち上げる(最大の強さ)",
+        0.0,
+        24.0,
+        0.5,
+        "上げるほど、とても小さい声も持ち上げられます。上げすぎると無音時のノイズが目立つことがあります。",
+        "控えめ",
+        "最大まで持ち上げる",
+    ),
 )
 
 # キー -> (最小, 最大)。config.json経由で範囲外の極端な値が注入された場合に、
 # tk.Scale.set()の暗黙のクランプ挙動に頼らず明示的にクランプするために使う
 # (Reviewer指摘5)。
 _ADVANCED_SLIDER_RANGES: dict[str, tuple[float, float]] = {
-    key: (lo, hi) for key, _label, lo, hi, _res in ADVANCED_SLIDER_SPECS
+    spec.key: (spec.lo, spec.hi) for spec in ADVANCED_SLIDER_SPECS
 }
 
 
@@ -144,7 +297,7 @@ class App(tk.Tk):
         self.clarity_combo = ttk.Combobox(
             control_frame,
             textvariable=self.clarity_var,
-            values=list(presets.CLARITY_LEVELS),
+            values=[presets.LEVEL_LABELS_JA[level] for level in presets.CLARITY_LEVELS],
             state="readonly",
             width=20,
         )
@@ -156,7 +309,7 @@ class App(tk.Tk):
         self.noise_combo = ttk.Combobox(
             control_frame,
             textvariable=self.noise_var,
-            values=list(presets.NOISE_LEVELS),
+            values=[presets.LEVEL_LABELS_JA[level] for level in presets.NOISE_LEVELS],
             state="readonly",
             width=20,
         )
@@ -208,19 +361,35 @@ class App(tk.Tk):
 
         self._advanced_frame = ttk.LabelFrame(self, text="詳細設定(パラメータの生値)")
         self._advanced_sliders: dict[str, tk.Scale] = {}
-        for row, (key, label, lo, hi, res) in enumerate(ADVANCED_SLIDER_SPECS):
-            ttk.Label(self._advanced_frame, text=label).grid(row=row, column=0, sticky="w")
+        hint_font = ("TkDefaultFont", 8)
+        for i, spec in enumerate(ADVANCED_SLIDER_SPECS):
+            row = i * 2
+            ttk.Label(self._advanced_frame, text=spec.label).grid(row=row, column=0, sticky="w")
+            ttk.Label(self._advanced_frame, text=spec.hint_low, font=hint_font).grid(
+                row=row, column=1, sticky="e"
+            )
             scale = tk.Scale(
                 self._advanced_frame,
-                from_=lo,
-                to=hi,
-                resolution=res,
+                from_=spec.lo,
+                to=spec.hi,
+                resolution=spec.resolution,
                 orient="horizontal",
                 length=220,
-                command=lambda _value, key=key: self._on_advanced_slider_changed(key),
+                command=lambda _value, key=spec.key: self._on_advanced_slider_changed(key),
             )
-            scale.grid(row=row, column=1, sticky="ew")
-            self._advanced_sliders[key] = scale
+            scale.grid(row=row, column=2, sticky="ew")
+            ttk.Label(self._advanced_frame, text=spec.hint_high, font=hint_font).grid(
+                row=row, column=3, sticky="w"
+            )
+            self._advanced_sliders[spec.key] = scale
+            ttk.Label(
+                self._advanced_frame,
+                text=spec.description,
+                font=hint_font,
+                foreground="gray",
+                wraplength=420,
+                justify="left",
+            ).grid(row=row + 1, column=0, columnspan=4, sticky="w", pady=(0, 6))
 
     # --- 設定の復元/保存 --------------------------------------------------
 
@@ -242,8 +411,8 @@ class App(tk.Tk):
 
         self.processing_enabled_var.set(cfg.processing_enabled)
         self.preset_var.set(presets.PRESETS[cfg.preset].label_ja)
-        self.clarity_var.set(self.chain.clarity_level)
-        self.noise_var.set(self.chain.noise_level)
+        self.clarity_var.set(presets.LEVEL_LABELS_JA[self.chain.clarity_level])
+        self.noise_var.set(presets.LEVEL_LABELS_JA[self.chain.noise_level])
         self._sync_advanced_sliders_from_chain()
         self._apply_advanced_overrides(cfg.advanced_overrides)
         self._updating_from_code = False
@@ -284,8 +453,8 @@ class App(tk.Tk):
         preset_name = preset_label_to_name[self.preset_var.get()]
         self.chain.set_preset(preset_name)
         self._updating_from_code = True
-        self.clarity_var.set(self.chain.clarity_level)
-        self.noise_var.set(self.chain.noise_level)
+        self.clarity_var.set(presets.LEVEL_LABELS_JA[self.chain.clarity_level])
+        self.noise_var.set(presets.LEVEL_LABELS_JA[self.chain.noise_level])
         self._sync_advanced_sliders_from_chain()
         self._updating_from_code = False
         self._save_config()
@@ -293,7 +462,8 @@ class App(tk.Tk):
     def _on_clarity_selected(self, _event=None) -> None:
         if self._updating_from_code:
             return
-        self.chain.set_clarity(self.clarity_var.get())
+        label_to_level = {label: level for level, label in presets.LEVEL_LABELS_JA.items()}
+        self.chain.set_clarity(label_to_level[self.clarity_var.get()])
         self._updating_from_code = True
         self._sync_advanced_sliders_from_chain()
         self._updating_from_code = False
@@ -302,7 +472,8 @@ class App(tk.Tk):
     def _on_noise_selected(self, _event=None) -> None:
         if self._updating_from_code:
             return
-        self.chain.set_noise(self.noise_var.get())
+        label_to_level = {label: level for level, label in presets.LEVEL_LABELS_JA.items()}
+        self.chain.set_noise(label_to_level[self.noise_var.get()])
         self._updating_from_code = True
         self._sync_advanced_sliders_from_chain()
         self._updating_from_code = False
