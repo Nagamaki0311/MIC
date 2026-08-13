@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-08-13 T-007 PR #7マージ完了、v1.2.1ビルド公開
+
+### 実施内容
+- PR #7(`claude/current-setup-environment-65p1il` → `main`)を作成し、GitHub Actionsのビルド(`Build Windows executable`, run 31688971643)が成功したことを確認した後、draft解除・squashマージした(マージコミット`07a4e00`)。
+- Artifact `SoloClarity-v1.2.1-20260813`(40.9MB)が生成されていることを確認した。
+- PRの購読を解除した(マージ完了により監視終了)。
+
+### 結果
+- `main`ブランチが`07a4e00`まで進み、v1.2.1が最新版として確定した。
+- ダウンロード: https://github.com/Nagamaki0311/MIC/actions/runs/31688971643 のArtifacts欄から`SoloClarity-v1.2.1-20260813`を取得可能(Artifactの保持期限は2026-09-12まで)。
+
+### 次回開始位置
+- ユーザーによるWindows実機での確認待ち(`app/WINDOWS_VERIFICATION_CHECKLIST.md`、特にT-007で追加した見切れ解消・リサイズ・閉状態でのウィンドウサイズの3項目)。次のタスクが来るまでは待機。
+
 ## 2026-08-13 T-007完了、version 1.2.1確定
 
 ### 実施内容
