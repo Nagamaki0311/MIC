@@ -4,6 +4,23 @@
 
 ---
 
+## 2026-08-13 T-007 Reviewer指摘対応・第2ラウンドの自己発見バグ修正
+
+### 実施内容
+- Developer agentがセッション上限で中断したため、Managerが実装(Canvas幅の動的算出・resizable化・minsize設定・行/列weight設定)を引き取って完成させ、xvfbで見切れ解消を実測確認、回帰テスト3件を追加してpytest 121 passed・pyflakes警告0件を確認した上でコミット・プッシュした。
+- Reviewerによる敵対的検証で、High×1(閉状態でも`minsize`がパネルを開いた状態の高さまでウィンドウを強制的に膨張させ、row=6に不要な空白ができる)、Medium×1(`columnconfigure(0, weight=1)`が他フレームにも波及し、ウィンドウを広げると各フレームが不自然に間延びする)、Low×2(D-014の文書と実装の不一致、`_updating_from_code`ガード漏れのPLAUSIBLE指摘)が報告された。
+- Managerが指摘を引き取り、(1)minsizeの高さを閉状態のみから算出、(2)`columnconfigure(0, weight=1)`を削除、に修正。この過程で、Reviewer指摘4(PLAUSIBLE)の対応として一時grid→grid_remove処理を一度完全に廃止したところ、既存テスト`TestAdvancedApplyFeedback::test_config_restore_does_not_show_feedback`が新たに失敗することを自ら発見した。
+- 調査の結果、この一時map→unmapの手順は「D-013で確認済みのtk.Scaleの遅延`-command`発火」を打ち消す副作用を持っており、単純に廃止すると`__init__`完了後の最初の`app.update()`呼び出しでガードなしに発火してしまう(誤ってフィードバック表示・config保存が起きる)実際の回帰であることが判明した。一時grid→grid_removeの処理自体は残し、`_updating_from_code`ガードで囲む対応に変更した(Reviewer指摘4が推奨していた対応そのもの)。
+- `docs/decisions.md`のD-014に「修正ループ」「第2ラウンド」節を追加し、上記の経緯・最終実装を記録した。
+
+### 結果
+- `cd /home/user/MIC/app && python -m pytest tests/ -q`を3回連続実行し**123 passed**(既存118件 + 新規5件)、フレーキーな失敗なし。`pyflakes soloclarity tests`警告0件。
+- 回帰テスト5件: Canvas幅が内容幅以上であること、resizableであること、minsizeの幅がパネル展開時の要求幅以上であること、**閉状態でウィンドウが不要に膨張していないこと(High再発防止)**、**ウィンドウを広げても他フレームが不自然に伸縮しないこと(Medium再発防止)**。
+
+### 次回開始位置
+- 修正後の差分をコミット・プッシュし、Reviewerへ再検証を依頼する(Reviewerの指摘が実際にすべて解消しているか、新たに追加した一時grid区間のガード付き実装に問題がないかを再度敵対的に確認してもらう)。
+- 承認が得られたら、`app/soloclarity/__init__.py`の`__version__`をバグ修正としてパッチバージョン(1.2.1)へ更新し、コミット・PR作成・CI確認・マージ・最終ビルド提示という一連の流れを行う。
+
 ## 2026-08-13 T-007起票、原因特定・Developerへ委任
 
 ### 実施内容
