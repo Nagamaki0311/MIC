@@ -20,6 +20,7 @@
 | T-003 | 最終総点検・完成化（性能・音質・機能・UI/UX・安定性・敵対的検証） | 高 | 完了 | claude | Reviewerによる3巡の敵対的検証（D-005実装→High×2/Medium×1/Low×2発見→D-006対応→再検証で新規Medium1件発見→D-007対応→最終再検証）を経て、合計6件すべて解消(CONFIRMED)。Reviewer最終所見「このまま配布できる」。pytest 82 passed、pyflakes警告0件。version 1.0.0として確定・GitHub Actionsでビルド済み（D-008参照）。Windows実機・Discordでの最終確認はWINDOWS_VERIFICATION_CHECKLIST.mdに沿ってユーザー側で別途必要 |
 | T-004 | 実機報告: SoloCast→CABLE Input間のストリーム開始エラー(PaErrorCode -9993)の修正 | 高 | 完了 | claude | AudioEngineをInputStream/OutputStream+リングバッファ構成へ書き直し、Reviewer指摘(Medium: クリーンアップ連鎖失敗、Low: チェックリスト記載漏れ)も解消(CONFIRMED)。Reviewer所見「原因を論理的に取り除く変更」。pytest 100 passed。詳細はdocs/decisions.md D-009参照 |
 | T-005 | プリセット・詳細設定UIの再調整（「小さくて低い声＋高品質ノイズ除去」） | 高 | 完了 | claude | discord_call→quiet_low_voiceへ置き換え、ノイズ除去3段階再調整（除去量維持・ゲート緩和）、詳細設定15項目の日本語ラベル・説明・目安表示、9条件の合成信号テストをReviewerが独自検証しCONFIRMED。Reviewer最終所見「このまま次のビルドへ進めて問題ない」。詳細はdocs/decisions.md D-010・D-011参照 |
+| T-006 | ノイズ処理のバックグラウンド/インパクト2系統分離・最終総点検 | 高 | 実装中 | claude | WebRTC Audio Processingを調査したが利用可能なPythonバインディングが要件(TransientSuppressor未公開・ライセンス不明)を満たさず不採用と判断、RNNoise継続+自前の軽量トランジェント検出器を追加する方針を確定してDeveloperへ委任。詳細はdocs/decisions.md D-012参照 |
 
 ## バックログ（未着手・優先度未確定）
 

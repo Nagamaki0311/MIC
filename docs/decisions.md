@@ -442,3 +442,56 @@ RNNoise適用量(除去の質)とゲートの積極性(声を消さない)を分
 - 既存の`config.json`に保存された`preset: "discord_call"`は、`_is_valid_preset`により不正値としてデフォルト(新キー`quiet_low_voice`)へ自動フォールバックする(D-010で意図された挙動)。`advanced_overrides`のキー名(`clarity_200hz_gain_db`等)は無変更のため、詳細設定の保存値には影響しない。
 - xvfb環境で`App()`を起動し、詳細設定パネルを開いた状態で`_advanced_frame.winfo_children()`が75個(15スライダー×5ウィジェット: ラベル/左目安/スケール/右目安/説明)であること、プリセット・明瞭度・ノイズ除去のコンボボックスがそれぞれ日本語表示(`小さくて低い声＋高品質ノイズ除去`/`弱`/`標準`/`強`等)になっていることをクラッシュなしで確認した。
 - Windows実機・Discordでの実際の聞こえ方の確認は、この環境では引き続き実施不可能(D-001の既知の制約)。`app/WINDOWS_VERIFICATION_CHECKLIST.md`のプリセット名表記(「Discord通話」→「小さくて低い声＋高品質ノイズ除去」)も本タスクで合わせて更新した。
+
+---
+
+## D-012: ノイズ処理のバックグラウンド/インパクト2系統分離
+
+- 日付: 2026-08-13
+- 状態: 採用
+
+### 背景
+- Issue要件: 現在は単一のRNNoise適用量(`wet_dry_mix`)で全ノイズを一律に抑制しているが、これを「バックグラウンドノイズ(PCファン・空調等の定常音)」と「インパクト音(キー打鍵・クリック等の瞬間音)」の2系統に分離し、前者は積極的に抑制、後者は完全に消さず自然な範囲で残すよう再設計する。既定プリセットもこの2系統を反映した設定にする。
+- Issueから技術方式の比較検討を明示的に求められたため、以下を調査した。
+
+### 調査内容(技術方式の比較)
+- **WebRTC Audio Processing (WebRTC APM)**: `NoiseSuppression`(定常騒音向け、スペクトル減算ベース)と`TransientSuppressor`(打鍵音等の過渡音向け、旧`TypingDetection`の後継)が、実際に独立したモジュールとして存在することを確認した([WebRTC公式ソース](https://chromium.googlesource.com/external/webrtc/+/ad34dbe934/webrtc/modules/audio_processing/ns/noise_suppression.h)、[開発者向け解説記事](https://www.forasoft.com/learn/audio-for-video/articles-audio/webrtc-audio-pipeline-end-to-end))。要件と方向性が一致する既存技術である。
+- Python向けバインディングを調査した結果、`pywebrtc-audio`(strands-labs製、pybind11)がPyPIにwin_amd64を含む幅広いプラットフォームの事前ビルド済みwheelを公開していることを確認した(`pip download`せず`pypi.org`のJSON APIで直接確認)。しかし実際にこの環境へ`pip install`し中身を検証したところ、
+  - 公開APIは`AudioProcessor`/`EchoCanceller`/`GainController`/`NoiseSuppressor`/`VoiceDetector`の5クラスのみで、**`TransientSuppressor`が一切公開されていない**(まさに今回必要な機能が欠落している)。
+  - 全クラス・全メソッドにdocstringが一切なく、`NoiseSuppressor`に抑制強度を指定するパラメータも見当たらない(WebRTC APM本来の0〜3段階の強度指定が露出していない)。
+  - PyPIメタデータの`license`が`None`(ライセンス不明)であり、GPLv3で配布する本アプリに組み込む上で法的リスクがある。
+  - バージョンが`0.1.0`のみで実績・利用実績が確認できない。
+  - これらの理由により**不採用**と判断した。旧来の`webrtc-audio-processing`(xiongyihui製)はPyPI上のwheelがcp27/cp36のlinux_armv7lのみでwin_amd64が存在せず、そもそも導入不可能だった。
+- **WebRTC APM本体をソースからビルドしてバインディングを自作する案**: WebRTC本体は巨大なC++コードベースであり、ビルドシステム自体が複雑(depot_tools等が必要)。本アプリの「軽量ボイスプロセッサ」というスコープを大きく超えるため不採用。
+- **DeepFilterNet等のより新しいニューラルネット系デノイザーへの置き換え**: RNNoiseより高品質だがモデルサイズ・CPU負荷が大きく、「軽量」「低遅延」要件、およびD-001で確立した48kHz/480サンプル(10ms)フレームとの親和性の面でRNNoiseに劣る。加えてバックグラウンド/インパクトの分離という今回の要件そのものを解決しない(RNNoise同様、単一の統合モデル)。不採用。
+
+### 決定
+- **RNNoiseを引き続き採用**する(D-001の判断を維持)。既存の統合実績(T-001〜T-005で実証済みのCPU負荷約0.7ms/フレーム、BSDライセンス、フレームサイズの一致)を活かしつつ、以下を追加する。
+- **自前の軽量トランジェント検出器を新設**(`app/soloclarity/dsp/transient.py`予定)。既存ライブラリに要件を満たすものがなかったため(判定ラダー: 既存の依存関係で解決できないため最小実装)、以下の設計とする。
+  - 各フレーム(480サンプル=10ms)のRMSに対し、速い時定数のエンベロープ(`fast_env`、EMA係数0.7、時定数約14ms)と遅い時定数のエンベロープ(`slow_env`、EMA係数0.05、時定数約200ms)を追跡する。
+  - `ratio = fast_env / (slow_env + 1e-6)`を計算し、`transient_score = clamp((ratio - 1.0) / (TRANSIENT_RATIO_THRESHOLD - 1.0), 0.0, 1.0)`という連続値(0〜1)で「そのフレームがどれだけインパクト音らしいか」を表す(ハードな2値判定ではなく連続値にすることで、切り替わり時の不自然さを避ける)。`TRANSIENT_RATIO_THRESHOLD = 2.2`。
+  - 振幅が極小(無音相当、目安-45dBFS未満)の場合は`transient_score`を0に固定し、暗騒音レベルの微小な揺らぎを誤ってインパクト音と判定しないようにする。
+- **`NoiseStage`を拡張**し、`wet_dry_mix`(単一)を`background_wet_dry_mix`(定常ノイズ抑制強度)と`impact_wet_dry_mix`(インパクト音抑制強度、常に背景より弱い値を既定とする)の2つに分離する。`gate_threshold`/`gate_release_ms`(発話確率ゲート)は変更しない(声か否かを判定する既存の仕組みであり、定常/インパクトの区別とは直交する軸のため)。
+- **`VoiceChain.process()`の混合比計算を変更**: `mix = background_wet_dry_mix * (1 - transient_score) + impact_wet_dry_mix * transient_score`とし、この`mix`を既存の`denoised * mix + highpassed * (1 - mix)`のブレンドにそのまま使う(処理順序 Highpass→RNNoise→EQ→Compressor→AGC→Limiter→ゲート 自体は変更しない、D-001参照)。
+- **ノイズ除去3段階(`NOISE_STAGES`)を再定義**:
+
+| 段階 | background_wet_dry_mix | impact_wet_dry_mix | gate_threshold | gate_release_ms |
+|---|---|---|---|---|
+| weak | 0.35 | 0.15 | 0.12 | 350 |
+| standard | 0.80 | 0.25 | 0.20 | 250 |
+| strong | 1.00 | 0.35 | 0.25 | 200 |
+
+「強」段階でもインパクト音抑制(0.35)はバックグラウンド抑制(1.00)より大幅に弱く保つことで、「打鍵音は完全に消さず自然な範囲で残す」という方針をすべての段階で一貫させる。詳細設定パネルでは`noise_impact_wet_dry_mix`を独立して0〜1まで調整できるため、より強く消したいユーザーは手動で引き上げられる。
+
+- **既定プリセット(`quiet_low_voice`)の`label_ja`を更新**: 「小さくて低い声＋高品質ノイズ除去」→「小さくて低い声＋高品質バックグラウンドノイズ抑制＋弱いインパクト音抑制」に変更する。内部キー`quiet_low_voice`・`clarity="strong"`・`compressor`/`agc`の数値(D-010参照)は変更しない。`noise="strong"`のままだが、`NOISE_STAGES["strong"]`自体が上記の通り再定義されるため、プリセット側の参照は変更不要。
+
+### 詳細設定UIの変更
+- 既存の`noise_wet_dry_mix`スライダー(「周囲の音を減らす」)を、`noise_background_mix`と`noise_impact_mix`の2つに分割する。
+  - `noise_background_mix`: ラベル「周囲の音を減らす」、説明「上げるほどPCファンや空調などの連続した音が減ります。上げすぎると声が不自然になることがあります。」、目安「自然さ重視 → 除去重視」、範囲0.0-1.0。
+  - `noise_impact_mix`: ラベル「打鍵音などを減らす」、説明「上げるほどキーボードやクリック音が減ります。下げると自然な操作音が少し残ります。」、目安「自然に残す → しっかり減らす」、範囲0.0-1.0。
+- 上記以外の既存13スライダー(明瞭度6項目・ゲート2項目・コンプレッサー4項目・AGC2項目、合計から重複を除く)はT-005(D-010)の文言をそのまま維持する。「声の聞き取りやすさ」「低音」「声の音量差」に関するIssue記載の新しい例文は、T-005で実装済みの表現(「発音をはっきりさせる」「声のこもりを減らす」「小さい声を持ち上げる」等)が実質的に同じ意図をすでに満たしていると判断し、文言の作り直しは行わない(確認した上での判断であり、未対応ではない)。
+
+### 影響
+- `advanced_overrides`のキー名`noise_wet_dry_mix`が廃止され`noise_background_mix`/`noise_impact_mix`に置き換わる。旧キーを保存済みのユーザーの値は、`config.py`の型検証で単に無視され(不明キーとして無害に無視される、既存のキー単位フィルタリング挙動)、新しい2キーはプリセット既定値から始まる。これは意図的な仕様変更であり、後方互換は取らない(AGENTS.mdの「後方互換性を維持しない」方針、値の意味自体が変わるため中途半端な互換レイヤーは持たない)。
+- `pytest`のテストのうち、`noise_wet_dry_mix`を直接参照している既存テストは新しい2キーに合わせて更新が必要。
+- CPU負荷: トランジェント検出器はフレームごとにEMA更新2回・除算1回程度の軽量な処理であり、既存のベンチマーク予算(10ms中0.7ms程度)に対する影響は小さいと想定されるが、実際に`bench_chain`を再実行して数値で確認すること。
