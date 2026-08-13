@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-08-13 T-007起票、原因特定・Developerへ委任
+
+### 実施内容
+- v1.2.0の実機スクリーンショットで、T-006で追加したCanvas+Scrollbarのスライダーが横方向に見切れる問題、およびウィンドウを手動でリサイズできるようにしてほしいという要望が報告された。
+- `app/soloclarity/gui/app.py`を読み、原因を特定した: `_build_advanced_panel()`の`tk.Canvas`生成時、`height`(D-012で縦見切れ対策として明示指定済み)は指定されているが`width`が未指定のため、子ウィジェット(実際の必要幅500px超)より狭いTk既定幅でビューポートが確保され、スライダー右側が切り取られていた。
+- `docs/tasks.md`にT-007を起票(状態=実装中)、`docs/decisions.md`にD-014として原因・修正方針(Canvas幅を`winfo_reqwidth()`で動的算出、`resizable(True, True)`化、`minsize()`設定、行・列の`weight`設定)を記録した。
+
+### 結果
+- 実装自体はまだ着手していない(Developerへ委任する直前)。
+
+### 次回開始位置
+- Developer agentの実装完了を待ち、xvfbでの見切れ再現(修正前)・解消(修正後)確認、`pytest tests/`(既存118件がpassすること)を確認した上でReviewerへ回す。
+- Reviewer承認後、`app/soloclarity/__init__.py`の`__version__`をバグ修正としてパッチバージョン(1.2.1)へ更新し、コミット・PR作成・CI確認・マージ・最終ビルド提示という一連の流れ(T-001〜T-006と同じワークフロー)を行う。
+
 ## 2026-08-13 T-006完了、version 1.2.0確定
 
 ### 実施内容

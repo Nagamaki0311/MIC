@@ -585,3 +585,31 @@ T-005で実装済みの9条件テスト(条件1-6は無変更で流用)のうち
 - `advanced_overrides`のキー`noise_wet_dry_mix`が廃止され`noise_background_mix`/`noise_impact_mix`に置き換わった(D-012で意図された仕様変更、後方互換は取らない)。
 - 新規ファイル: `app/soloclarity/dsp/transient.py`、`app/tests/test_transient.py`。変更ファイル: `app/soloclarity/presets.py`、`app/soloclarity/dsp/chain.py`、`app/soloclarity/gui/app.py`、`app/tests/test_chain.py`、`app/tests/test_app_gui.py`、`app/はじめにお読みください.txt`、`app/WINDOWS_VERIFICATION_CHECKLIST.md`。
 - Windows実機・Discordでの実際の聞こえ方(特にインパクト音が「自然な範囲で残る」という主観評価)は、この環境では引き続き検証不可能(D-001の既知の制約)。`app/WINDOWS_VERIFICATION_CHECKLIST.md`に沿ったユーザー側での最終確認が必要。
+
+---
+
+## D-014: T-007 詳細設定パネルのスライダーが横方向に見切れる問題の原因特定・修正方針
+
+- 日付: 2026-08-13
+- 状態: 採用
+
+### 背景
+D-012で追加した`tk.Canvas`+`ttk.Scrollbar`による縦スクロール対応(T-006)の実機検証(v1.2.0)で、縦方向の見切れは解消したものの、今度は詳細設定スライダー(`tk.Scale`)が横方向に見切れて表示され、右側の目安ラベルやスライダーのつまみが見えないという新たな問題が報告された。ユーザーからはあわせて、ウィンドウサイズを手元で拡縮できるようにしてほしいという要望があった。
+
+### 決定
+1. **根本原因**: `app/soloclarity/gui/app.py`の`_build_advanced_panel()`で`tk.Canvas`を生成する際、`height=ADVANCED_PANEL_MAX_HEIGHT_PX`(縦方向の見切れ対策としてD-012で明示指定済み)は指定しているが、`width`を指定していない。Tkinterの`Canvas`は`width`未指定時、内部の子ウィジェット(`self._advanced_frame`、ラベル・スライダー・目安・説明文を含む実際の必要幅は500px超)の要求サイズとは無関係に、Tkの既定幅(数百px未満)で確保される。結果としてCanvasの表示領域(ビューポート)が内容より狭くなり、スライダー本体を含む右側が切り取られる。縦方向はD-012で明示的に`height`を指定していたため同じ問題が起きていなかった。
+2. **修正方針**:
+   - `_build_advanced_panel()`でスライダー行をすべて構築した後、`update_idletasks()`で`self._advanced_frame`の実際の要求幅(`winfo_reqwidth()`)を確定させ、その値を`self._advanced_canvas`の`width`へ明示的に設定する(Canvas自身に子ウィジェットの要求幅を反映させる、ハードコードされた固定px値は使わない)。
+   - `self.resizable(False, False)` → `self.resizable(True, True)`に変更し、ユーザーがウィンドウサイズを手動で拡縮できるようにする(実機からの明示的な要望)。
+   - リサイズ後にウィンドウを縮めすぎて再度見切れることを防ぐため、詳細設定パネルを含めた必要最小幅・高さを`minsize()`で設定する(パネルは初期状態で非表示のため、`_advanced_frame.winfo_reqwidth()`を直接使って計算し、ルートウィンドウの`winfo_reqwidth()`だけに頼らない)。
+   - ルートの列(`columnconfigure`)・詳細設定パネル行の`rowconfigure`に`weight`を設定し、ウィンドウを広げた際に各フレーム・Canvasの表示領域も追従して広がるようにする(広げても中身のサイズが変わらず余白だけ増える、という中途半端な体験を避ける)。
+
+### 理由
+- 判定ラダーに従い、新しいウィジェット・外部ライブラリを追加せず、Tkinter標準の`winfo_reqwidth()`(既存の`ADVANCED_PANEL_MAX_HEIGHT_PX`という固定pxアプローチよりも、内容に追従する分壊れにくい)と`resizable()`/`minsize()`という標準APIのみで解決する。
+- 「バグは根本原因を直す」(AGENTS.md)に従い、Canvasの幅が子の要求幅を反映していないという構造上の原因に対処する。個々のスライダーの`length=220`を単に伸ばすような対症療法は、根本原因(Canvasビューポートの幅)を放置したままになるため採用しない。
+- resizable化はD-012時点では「既存レイアウトの安全性を優先」として意図的に見送っていたが(D-012該当箇所参照)、実機フィードバックにより解像度・DPI環境によって最適なウィンドウサイズが一様でないことが明らかになったため、ここで方針を変更する。
+
+### 影響
+- `app/soloclarity/gui/app.py`の`__init__`・`_build_advanced_panel()`を変更。
+- 既存の`ADVANCED_PANEL_MAX_HEIGHT_PX`(縦方向の初期高さの目安)はそのまま残す(resizable化後もウィンドウの初期サイズとしては妥当なため)。
+- 実装はDeveloperへ委任し、xvfbでの見切れ再現確認(修正前)・解消確認(修正後)、回帰テスト追加、既存118件のpytestが引き続きpassすることを実装完了の条件とする。

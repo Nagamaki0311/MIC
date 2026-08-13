@@ -21,6 +21,7 @@
 | T-004 | 実機報告: SoloCast→CABLE Input間のストリーム開始エラー(PaErrorCode -9993)の修正 | 高 | 完了 | claude | AudioEngineをInputStream/OutputStream+リングバッファ構成へ書き直し、Reviewer指摘(Medium: クリーンアップ連鎖失敗、Low: チェックリスト記載漏れ)も解消(CONFIRMED)。Reviewer所見「原因を論理的に取り除く変更」。pytest 100 passed。詳細はdocs/decisions.md D-009参照 |
 | T-005 | プリセット・詳細設定UIの再調整（「小さくて低い声＋高品質ノイズ除去」） | 高 | 完了 | claude | discord_call→quiet_low_voiceへ置き換え、ノイズ除去3段階再調整（除去量維持・ゲート緩和）、詳細設定15項目の日本語ラベル・説明・目安表示、9条件の合成信号テストをReviewerが独自検証しCONFIRMED。Reviewer最終所見「このまま次のビルドへ進めて問題ない」。詳細はdocs/decisions.md D-010・D-011参照 |
 | T-006 | ノイズ処理のバックグラウンド/インパクト2系統分離・最終総点検 | 高 | 完了 | claude | TransientDetector新設、NoiseStage2分割、詳細設定スライダーのライブ反映確認・縦スクロール対応も実施。ReviewerがMedium指摘1件(無音からの立ち上がり時、トランジェント検出器が約120ms背景抑制を弱める既知の限界、声自体は欠落せず自己制限的)を発見したがリリースをブロックしないと判断、その他はすべてCONFIRMED。Reviewer最終所見「このまま次のビルドへ進めて問題ない」。pytest 118 passed。詳細はdocs/decisions.md D-012・D-013参照 |
+| T-007 | 実機報告: 詳細設定パネルのスライダーが横方向に見切れる問題の修正・ウィンドウのリサイズ可能化 | 高 | 実装中 | claude | v1.2.0実機スクリーンショットで、T-006のCanvas+Scrollbar導入後にスライダーが横方向に見切れることが報告された。原因調査済み: `tk.Canvas`に`height`のみ明示指定し`width`を指定していなかったため、Tkの既定幅(内容より狭い)でクリップされていた。resizable(False, False)のままだったこともユーザーからの改善要望点。修正方針・担当はdocs/decisions.md D-014参照 |
 
 ## バックログ（未着手・優先度未確定）
 
