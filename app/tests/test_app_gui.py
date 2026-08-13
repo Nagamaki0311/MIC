@@ -16,7 +16,9 @@ import pytest
 
 from soloclarity import __version__, presets
 from soloclarity.audio import devices as device_lib
+from soloclarity.audio.engine import AudioEngine
 from soloclarity.dsp import chain as chain_mod
+from soloclarity.dsp.chain import FRAME_SIZE
 from soloclarity.gui import app as app_mod
 
 
@@ -315,3 +317,164 @@ class TestTestButtonThreadSafety:
 
         assert close_call_count["n"] == 2  # 2回とも呼ばれた(2回目は即returnする)こと
         assert errors == []  # 再入によるTclErrorが発生しないこと
+
+
+class TestAdvancedSliderChangesReflectLiveInAudioEngine:
+    """Manager指摘(追加1): 詳細設定スライダーの変更がAudioEngineの実処理へ
+    ライブ反映されているかを、xvfb環境でAudioEngineを(実オーディオデバイスを
+    介さず)直接駆動して検証する。`App._apply_slider_values_to_chain()`は
+    `self.chain`(AudioEngineがコールバック内で参照するのと同一のインスタンス)
+    を直接書き換えるため、追加の配線なしに次のフレームから反映されるはずである。
+    """
+
+    @staticmethod
+    def _process_once(engine: AudioEngine, frame: np.ndarray) -> np.ndarray:
+        indata = frame.reshape(-1, 1)
+        engine._input_callback(indata, FRAME_SIZE, None, None)
+        outdata = np.zeros((FRAME_SIZE, 1), dtype=np.float32)
+        engine._output_callback(outdata, FRAME_SIZE, None, None)
+        return outdata[:, 0].copy()
+
+    def test_engine_holds_the_same_chain_instance_as_the_app(self, app_factory):
+        app = app_factory()
+        engine = AudioEngine(app.chain)
+        assert engine.chain is app.chain
+
+    def test_moving_a_slider_mutates_the_chain_the_engine_is_already_wired_to(self, app_factory):
+        app = app_factory()
+        engine = AudioEngine(app.chain)
+        app._toggle_advanced()  # 実際のユーザー操作と同じく、パネルを開いてから動かす
+        app.update()
+
+        before_stage = app.chain._noise_stage
+        new_value = 0.0 if before_stage.background_wet_dry_mix != 0.0 else 1.0
+        app._advanced_sliders["noise_background_mix"].set(new_value)
+        app.update()
+
+        # set_noise_stage()は新しいNoiseStageインスタンスを代入する(chain.py参照)。
+        assert app.chain._noise_stage is not before_stage
+        assert app.chain._noise_stage.background_wet_dry_mix == pytest.approx(new_value)
+        # AudioEngine.chainはApp.chainと同一オブジェクトなので、ストリームを
+        # 再構築しなくても次のフレームから新しい値が使われる。
+        assert engine.chain._noise_stage.background_wet_dry_mix == pytest.approx(new_value)
+
+    def test_input_callback_output_changes_after_slider_moves(self, app_factory):
+        """スライダー変更の効果が、実際に_input_callback/_output_callback
+        経由の出力に現れることを、同一入力に対する処理結果の変化で確認する。"""
+        app = app_factory()
+        engine = AudioEngine(app.chain)
+        app._toggle_advanced()
+        app.update()
+
+        rng = np.random.default_rng(1)
+        frame = rng.normal(0.0, 0.05, FRAME_SIZE).astype(np.float32)
+        out_before = self._process_once(engine, frame)
+
+        # background_wet_dry_mixを大きく変える(RNNoiseの適用量が変わり、
+        # 同一フレームに対する出力が変わるはず)。
+        app._advanced_sliders["noise_background_mix"].set(0.0)
+        app.update()
+        out_after = self._process_once(engine, frame)
+
+        assert not np.allclose(out_before, out_after)
+
+
+class TestOpeningAdvancedPanelDoesNotSpuriouslyChangeSettings:
+    """Manager指摘(追加1)の調査で判明した副作用への回帰テスト。
+
+    tk.Scaleは初めて画面上にマップされる際、内部の表示同期処理として
+    -commandを現在値のまま自動的に一度発火させることがある(xvfb実機検証で
+    確認したTkinter固有の挙動)。ユーザーが何も操作していないのに詳細設定
+    パネルを開いただけでchainの値やconfig.jsonが変わってしまわないことを
+    確認する(ガード無しではこの挙動が再現することを、ガードを一時的に外す
+    ことで確認済み)。
+    """
+
+    def test_first_open_does_not_mutate_chain_or_show_feedback(self, app_factory):
+        app = app_factory()
+        before_values = {key: scale.get() for key, scale in app._advanced_sliders.items()}
+        before_mix = app.chain._noise_stage.background_wet_dry_mix
+
+        app._toggle_advanced()
+        app.update()
+
+        after_values = {key: scale.get() for key, scale in app._advanced_sliders.items()}
+        assert after_values == before_values
+        assert app.chain._noise_stage.background_wet_dry_mix == before_mix
+        assert app.advanced_apply_status_var.get() == ""
+
+
+class TestAdvancedApplyFeedback:
+    """Manager指摘(追加1): 反映済みであることをユーザーに示すフィードバック表示。"""
+
+    def test_real_slider_change_shows_and_then_clears_feedback(self, app_factory, monkeypatch):
+        monkeypatch.setattr(app_mod, "ADVANCED_APPLY_FEEDBACK_DURATION_MS", 50)
+        app = app_factory()
+        app._toggle_advanced()
+        app.update()
+
+        assert app.advanced_apply_status_var.get() == ""
+        app._advanced_sliders["noise_impact_mix"].set(0.9)
+        app.update()
+        assert app.advanced_apply_status_var.get() == "設定を反映しました"
+
+        import time
+
+        time.sleep(0.1)
+        app.update()
+        assert app.advanced_apply_status_var.get() == ""
+
+    def test_config_restore_does_not_show_feedback(self, app_factory):
+        """`_apply_advanced_overrides`(config復元経路)は`_apply_slider_values_to_chain()`
+        を直接呼ぶため、ユーザー操作用のフィードバックは表示されないこと。"""
+        app = app_factory()
+        app._apply_advanced_overrides({"noise_impact_mix": 0.5})
+        app.update()
+        assert app.advanced_apply_status_var.get() == ""
+
+
+class TestAdvancedPanelIsScrollableAndWindowFitsCommonScreens:
+    """Manager指摘(追加2): ウィンドウが縦長で画面からはみ出る問題への対応。
+
+    詳細設定パネルをCanvas+Scrollbarでラップし、パネルを開いた状態でも
+    ウィンドウ全体の高さが一般的なノートPC画面(1366x768等)に収まる
+    (またはスクロールで全項目にアクセスできる)ことを確認する。
+    """
+
+    # 1366x768のようなノートPC画面でタイトルバー・タスクバー分の余白を見込んだ
+    # 上限。ウィンドウの高さがこれを超えないことを確認する。
+    COMMON_LAPTOP_SCREEN_HEIGHT_MARGIN = 700
+
+    def test_window_height_with_panel_open_fits_common_laptop_screen(self, app_factory):
+        app = app_factory()
+        app.update()
+        app._toggle_advanced()
+        app.update()
+
+        assert app.winfo_height() <= self.COMMON_LAPTOP_SCREEN_HEIGHT_MARGIN
+
+    def test_advanced_frame_content_exceeds_visible_canvas_and_scrollbar_covers_it(
+        self, app_factory
+    ):
+        """16項目分のスライダー全体の高さは表示領域より大きく、実際に
+        スクロール可能である(=はみ出た項目にアクセスする手段がある)ことを
+        確認する。"""
+        app = app_factory()
+        app._toggle_advanced()
+        app.update()
+        app.update_idletasks()
+
+        content_height = app._advanced_frame.winfo_reqheight()
+        assert content_height > app_mod.ADVANCED_PANEL_MAX_HEIGHT_PX
+
+        before_top = app._advanced_canvas.yview()[0]
+        app._advanced_canvas.yview_scroll(5, "units")
+        app.update()
+        after_top = app._advanced_canvas.yview()[0]
+        assert after_top > before_top
+
+    def test_base_screen_without_advanced_panel_fits_common_laptop_screen(self, app_factory):
+        """詳細設定を開く前の基本画面自体も、一般的なノートPC画面に収まること。"""
+        app = app_factory()
+        app.update()
+        assert app.winfo_height() <= self.COMMON_LAPTOP_SCREEN_HEIGHT_MARGIN

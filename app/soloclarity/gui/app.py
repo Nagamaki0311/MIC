@@ -26,6 +26,12 @@ TEST_PREVIEW_SECONDS = 3.0
 TEST_THREAD_JOIN_TIMEOUT_SECONDS = TEST_PREVIEW_SECONDS * 2 + 5.0
 # `_on_close`がworker threadの完了を待つ間、self.update()を呼ぶ間隔。
 TEST_THREAD_POLL_INTERVAL_SECONDS = 0.01
+# 詳細設定パネルの表示領域の最大高さ(px)。一般的なノートPC画面(1366x768等)でも
+# ウィンドウ全体が画面に収まるよう、この高さを超える分はCanvas+Scrollbarで
+# スクロールさせる(Manager指摘: 縦長で画面からはみ出る問題への対応)。
+ADVANCED_PANEL_MAX_HEIGHT_PX = 260
+# スライダー変更が反映されたことを示すフィードバック表示を消すまでの時間。
+ADVANCED_APPLY_FEEDBACK_DURATION_MS = 1500
 
 class SliderSpec(NamedTuple):
     """詳細設定スライダー1項目の定義。
@@ -107,14 +113,24 @@ ADVANCED_SLIDER_SPECS: tuple[SliderSpec, ...] = (
         "はっきり",
     ),
     SliderSpec(
-        "noise_wet_dry_mix",
+        "noise_background_mix",
         "周囲の音を減らす",
         0.0,
         1.0,
         0.01,
-        "上げるほど周囲の雑音が減ります。上げすぎると声が不自然になることがあります。",
+        "上げるほどPCファンや空調などの連続した音が減ります。上げすぎると声が不自然になることがあります。",
         "自然さ重視",
         "除去重視",
+    ),
+    SliderSpec(
+        "noise_impact_mix",
+        "打鍵音などを減らす",
+        0.0,
+        1.0,
+        0.01,
+        "上げるほどキーボードやクリック音が減ります。下げると自然な操作音が少し残ります。",
+        "自然に残す",
+        "しっかり減らす",
     ),
     SliderSpec(
         "noise_gate_threshold",
@@ -352,14 +368,74 @@ class App(tk.Tk):
 
     def _build_advanced_panel(self) -> None:
         self._advanced_visible = False
+        self._advanced_apply_feedback_after_id: Optional[str] = None
         toggle_frame = ttk.Frame(self)
         toggle_frame.grid(row=5, column=0, sticky="ew", padx=8, pady=(4, 0))
         self._advanced_toggle_button = ttk.Button(
             toggle_frame, text="詳細設定を開く", command=self._toggle_advanced
         )
         self._advanced_toggle_button.grid(row=0, column=0, sticky="w")
+        # スライダーを動かすと即座にマイク入力へ反映される(既存の即時反映という
+        # 設計を維持する。専用の「適用」ボタンは追加しない)が、それがユーザーに
+        # 分からないというUXの問題(Manager指摘)への対応として、反映時に短く
+        # フィードバックを表示する。スクロール領域の外(常に見える位置)に置く。
+        self.advanced_apply_status_var = tk.StringVar(value="")
+        ttk.Label(
+            toggle_frame, textvariable=self.advanced_apply_status_var, foreground="green"
+        ).grid(row=0, column=1, sticky="w", padx=(8, 0))
 
-        self._advanced_frame = ttk.LabelFrame(self, text="詳細設定(パラメータの生値)")
+        # 詳細設定パネルは項目数が多く(16項目)、全体を表示すると一般的な
+        # ノートPC画面(1366x768等)に収まらずウィンドウ下部が画面外に隠れる
+        # (Manager指摘)。そのためCanvas+Scrollbarで縦スクロール可能にラップする。
+        self._advanced_outer = ttk.LabelFrame(self, text="詳細設定(パラメータの生値)")
+        self._advanced_outer.columnconfigure(0, weight=1)
+        self._advanced_outer.rowconfigure(0, weight=1)
+        self._advanced_canvas = tk.Canvas(
+            self._advanced_outer, height=ADVANCED_PANEL_MAX_HEIGHT_PX, highlightthickness=0
+        )
+        advanced_scrollbar = ttk.Scrollbar(
+            self._advanced_outer, orient="vertical", command=self._advanced_canvas.yview
+        )
+        self._advanced_canvas.configure(yscrollcommand=advanced_scrollbar.set)
+        self._advanced_canvas.grid(row=0, column=0, sticky="nsew")
+        advanced_scrollbar.grid(row=0, column=1, sticky="ns")
+
+        self._advanced_frame = ttk.Frame(self._advanced_canvas)
+        advanced_window = self._advanced_canvas.create_window(
+            (0, 0), window=self._advanced_frame, anchor="nw"
+        )
+
+        def _sync_scrollregion(_event=None):
+            self._advanced_canvas.configure(scrollregion=self._advanced_canvas.bbox("all"))
+
+        def _sync_inner_width(event):
+            self._advanced_canvas.itemconfigure(advanced_window, width=event.width)
+
+        self._advanced_frame.bind("<Configure>", _sync_scrollregion)
+        self._advanced_canvas.bind("<Configure>", _sync_inner_width)
+
+        def _on_mousewheel(event) -> None:
+            if event.num == 5 or event.delta < 0:
+                self._advanced_canvas.yview_scroll(1, "units")
+            elif event.num == 4 or event.delta > 0:
+                self._advanced_canvas.yview_scroll(-1, "units")
+
+        def _bind_mousewheel(_event=None) -> None:
+            # Windows/mac(<MouseWheel>)とLinux/X11(<Button-4>/<Button-5>)の
+            # どちらでもスクロールできるようにする。パネルを開いている間だけ
+            # bind_allし、離れたら解除する(他ウィジェットのスクロールを妨げない)。
+            self._advanced_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+            self._advanced_canvas.bind_all("<Button-4>", _on_mousewheel)
+            self._advanced_canvas.bind_all("<Button-5>", _on_mousewheel)
+
+        def _unbind_mousewheel(_event=None) -> None:
+            self._advanced_canvas.unbind_all("<MouseWheel>")
+            self._advanced_canvas.unbind_all("<Button-4>")
+            self._advanced_canvas.unbind_all("<Button-5>")
+
+        self._advanced_canvas.bind("<Enter>", _bind_mousewheel)
+        self._advanced_canvas.bind("<Leave>", _unbind_mousewheel)
+
         self._advanced_sliders: dict[str, tk.Scale] = {}
         hint_font = ("TkDefaultFont", 8)
         for i, spec in enumerate(ADVANCED_SLIDER_SPECS):
@@ -492,7 +568,8 @@ class App(tk.Tk):
             "clarity_2000hz_gain_db": band_by_freq[2000.0].gain_db,
             "clarity_3000hz_gain_db": band_by_freq[3000.0].gain_db,
             "clarity_4000hz_gain_db": band_by_freq[4000.0].gain_db,
-            "noise_wet_dry_mix": noise_stage.wet_dry_mix,
+            "noise_background_mix": noise_stage.background_wet_dry_mix,
+            "noise_impact_mix": noise_stage.impact_wet_dry_mix,
             "noise_gate_threshold": noise_stage.gate_threshold,
             "noise_gate_release_ms": noise_stage.gate_release_ms,
             "compressor_threshold_db": preset.compressor.threshold_db,
@@ -519,6 +596,21 @@ class App(tk.Tk):
         if self._updating_from_code:
             return
         self._apply_slider_values_to_chain()
+        self._show_advanced_apply_feedback()
+
+    def _show_advanced_apply_feedback(self) -> None:
+        """スライダー変更が(既に)ライブ入力へ反映されたことを短く表示する。
+
+        `_apply_slider_values_to_chain()`は`self.chain`(AudioEngineが実際の
+        コールバックで参照しているのと同一のインスタンス)を直接書き換えるため、
+        反映自体は呼び出された時点で完了している。反映有無をユーザーが確認
+        できるよう、フィードバックのみを追加する(Manager指摘)。"""
+        self.advanced_apply_status_var.set("設定を反映しました")
+        if self._advanced_apply_feedback_after_id is not None:
+            self.after_cancel(self._advanced_apply_feedback_after_id)
+        self._advanced_apply_feedback_after_id = self.after(
+            ADVANCED_APPLY_FEEDBACK_DURATION_MS, lambda: self.advanced_apply_status_var.set("")
+        )
 
     def _apply_slider_values_to_chain(self) -> None:
         s = {key: scale.get() for key, scale in self._advanced_sliders.items()}
@@ -533,7 +625,8 @@ class App(tk.Tk):
             ),
         )
         noise_stage = presets.NoiseStage(
-            wet_dry_mix=s["noise_wet_dry_mix"],
+            background_wet_dry_mix=s["noise_background_mix"],
+            impact_wet_dry_mix=s["noise_impact_mix"],
             gate_threshold=s["noise_gate_threshold"],
             gate_release_ms=s["noise_gate_release_ms"],
         )
@@ -554,10 +647,17 @@ class App(tk.Tk):
     def _toggle_advanced(self) -> None:
         self._advanced_visible = not self._advanced_visible
         if self._advanced_visible:
-            self._advanced_frame.grid(row=6, column=0, sticky="ew", padx=8, pady=4)
+            # tk.Scaleは初めて画面上にマップされる際、内部の表示同期処理として
+            # 各スライダーの-commandを現在値のまま自動的に一度発火させることが
+            # ある(xvfb実機検証で確認したTkinter固有の挙動)。ユーザー操作では
+            # ないため、既存の_updating_from_codeガードで無視してから表示する。
+            self._updating_from_code = True
+            self._advanced_outer.grid(row=6, column=0, sticky="ew", padx=8, pady=4)
+            self.update()
+            self._updating_from_code = False
             self._advanced_toggle_button.configure(text="詳細設定を閉じる")
         else:
-            self._advanced_frame.grid_remove()
+            self._advanced_outer.grid_remove()
             self._advanced_toggle_button.configure(text="詳細設定を開く")
 
     def _on_test_clicked(self) -> None:

@@ -1,8 +1,9 @@
 """パラメータ定義（明瞭度/ノイズ除去の3段階 + プリセット）。
 
 数値の根拠はdocs/decisions.md D-001（初版）・D-010（既定プリセットの再調整、
-ノイズ除去3段階の再調整）に記載のパラメータ表そのもの。UIやDSPチェーンはこの
-モジュールの値のみを参照し、数値をコード中に埋め込まないこと。
+ノイズ除去3段階の再調整）・D-012（バックグラウンド/インパクト2系統分離）に
+記載のパラメータ表そのもの。UIやDSPチェーンはこのモジュールの値のみを参照し、
+数値をコード中に埋め込まないこと。
 """
 
 from __future__ import annotations
@@ -72,15 +73,22 @@ LEVEL_LABELS_JA: dict[str, str] = {"weak": "弱", "standard": "標準", "strong"
 
 @dataclass(frozen=True)
 class NoiseStage:
-    wet_dry_mix: float  # 0.0-1.0, RNNoise denoise後の信号をどれだけ混ぜるか
+    background_wet_dry_mix: float  # 0.0-1.0, 定常ノイズに対するRNNoise denoise適用量
+    impact_wet_dry_mix: float  # 0.0-1.0, インパクト音に対するRNNoise denoise適用量
     gate_threshold: float  # 発話確率(0.0-1.0)のこの値未満をゲートで減衰させる
     gate_release_ms: float
 
 
 NOISE_STAGES: dict[str, NoiseStage] = {
-    "weak": NoiseStage(wet_dry_mix=0.30, gate_threshold=0.12, gate_release_ms=350.0),
-    "standard": NoiseStage(wet_dry_mix=0.78, gate_threshold=0.20, gate_release_ms=250.0),
-    "strong": NoiseStage(wet_dry_mix=1.00, gate_threshold=0.25, gate_release_ms=200.0),
+    "weak": NoiseStage(
+        background_wet_dry_mix=0.35, impact_wet_dry_mix=0.15, gate_threshold=0.12, gate_release_ms=350.0
+    ),
+    "standard": NoiseStage(
+        background_wet_dry_mix=0.80, impact_wet_dry_mix=0.25, gate_threshold=0.20, gate_release_ms=250.0
+    ),
+    "strong": NoiseStage(
+        background_wet_dry_mix=1.00, impact_wet_dry_mix=0.35, gate_threshold=0.25, gate_release_ms=200.0
+    ),
 }
 
 NOISE_LEVELS: tuple[str, ...] = ("weak", "standard", "strong")
@@ -154,7 +162,7 @@ PRESETS: dict[str, Preset] = {
     ),
     "quiet_low_voice": Preset(
         name="quiet_low_voice",
-        label_ja="小さくて低い声＋高品質ノイズ除去",
+        label_ja="小さくて低い声＋高品質バックグラウンドノイズ抑制＋弱いインパクト音抑制",
         clarity="strong",
         noise="strong",
         compressor=CompressorParams(-23.0, 2.8, 10.0, 200.0),

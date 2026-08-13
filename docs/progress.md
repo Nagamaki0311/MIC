@@ -2,6 +2,53 @@
 
 作業内容、実施結果、次回開始位置を記録する。新しいエントリは先頭に追加する（新しい順）。
 
+---
+
+## 2026-08-13 T-006完了、version 1.2.0確定
+
+### 実施内容
+- Reviewerの最終所見(Medium指摘1件を除きすべてCONFIRMED、Medium自体も「声の欠落はなく自己制限的、リリースをブロックしない」との判断、「このまま次のビルドへ進めて問題ない」)を受け、`docs/tasks.md`のT-006を完了に更新した。
+- Reviewerが推奨した最小対応として、`app/WINDOWS_VERIFICATION_CHECKLIST.md`に「静かな部屋で発話の合間の後、話し始めの一瞬だけ背景ノイズ抑制が弱まって聞こえないか」という確認項目を追加した。回帰テスト自体の追加(Reviewer推奨の別案)は次タスクのバックログへ記録した。
+- `app/soloclarity/__init__.py`の`__version__`を`1.1.0`→`1.2.0`へ変更(ノイズ処理のバックグラウンド/インパクト2系統分離という新機能追加のため、D-008のバージョニング方針に従いマイナーバージョンを上げる判断)。
+
+### 結果
+- このLinux環境での最終確認: `pytest tests/` 118 passed、`pyflakes soloclarity tests` 警告0件。
+- ReviewerがManagerの事前調査(WebRTC Audio Processing比較)・Developerの実装(TransientDetector、NoiseStage2分割)を独立に検証し、2系統分離が実際に機能していること、打鍵音抑制による声の欠損がないこと、ライブ反映・スクロール対応がいずれも正しく動作することをCONFIRMEDした。
+- 唯一のMedium指摘(真の無音から音が立ち上がる際、トランジェント検出器の過渡特性により約120ms背景抑制が弱まる)は、声自体が欠落するものではなく、影響が最も出る「元々静かな部屋」ほど漏れるノイズの絶対量が小さいという自己制限的な性質があるため、Reviewer自身がブロッキング指摘としないことを推奨し、Managerもこれに従った。
+- Windows実機・Discordでの実際の聞こえ方(特に今回のバックグラウンド/インパクト分離、真の無音からの立ち上がり)は、このLinux環境では引き続き検証不可能。`app/WINDOWS_VERIFICATION_CHECKLIST.md`に沿ったユーザー側での確認が必要。
+
+### 次回開始位置
+- GitHub ActionsのCI実行結果を確認し、成功していればPRをマージして最終Artifact(`SoloClarity-v1.2.0-{ビルド日}`)のダウンロードリンクをユーザーへ案内する。
+
+---
+
+## 2026-08-13 T-006実装(ノイズ処理2系統分離、詳細設定スライダーのライブ反映UX・スクロール対応)
+
+### 実施内容
+- D-012(Manager確定済み)の設計をそのまま実装した。
+  - `app/soloclarity/dsp/transient.py`(新規): `TransientDetector`クラス(fast_env/slow_envのEMA比からtransient_scoreを算出、無音フロア-45dBFS)。
+  - `app/soloclarity/presets.py`: `NoiseStage`を`background_wet_dry_mix`/`impact_wet_dry_mix`の2フィールドへ変更、`NOISE_STAGES`をD-012の表どおり再定義、`quiet_low_voice`の`label_ja`更新。
+  - `app/soloclarity/dsp/chain.py`: `VoiceChain`に`TransientDetector`を統合。Highpass後・RNNoise前の信号に対し毎フレーム`transient_score`を計算し、`mix = background*(1-score) + impact*score`で混合比を算出するよう変更。処理順序は無変更。
+  - `app/soloclarity/gui/app.py`: `noise_wet_dry_mix`スライダーを`noise_background_mix`/`noise_impact_mix`の2つに分割(D-012の文言をそのまま使用)。
+  - `app/tests/test_transient.py`(新規4件)・`app/tests/test_chain.py`(14条件テストへ再構成、条件8/10/11/13/14を新設)を追加。
+- Manager追加指摘2件に対応した。
+  1. 詳細設定スライダーのライブ反映: xvfb環境でAudioEngineを直接駆動して調査した結果、設計・配線自体は正しく機能していることを確認(`engine.chain is app.chain`)。調査過程で、詳細設定パネルを初めて開いた際に`tk.Scale`が一部スライダーの`-command`を自動発火させる副作用(Tkinter固有の挙動)を発見し、`_updating_from_code`ガードで無視するよう対応した。あわせて「設定を反映しました」という短いフィードバック表示を追加した(専用の「適用」ボタンは既存の即時反映という設計を後退させるため不採用)。
+  2. 詳細設定パネルの縦スクロール対応: パネルを開いた状態のウィンドウ高さが1567px(xvfb実測)あり一般的なノートPC画面に収まらない問題を、`tk.Canvas`+`ttk.Scrollbar`によるラップで解消(修正後635px)。
+- `docs/decisions.md`にD-013として実装詳細・14条件テストの実測結果・bench/soak再測定値を記録した。
+
+### 結果
+- `pytest tests/`(このLinux環境): **118 passed**(D-011時点100件から18件増: test_transient.py新規4件、test_chain.pyの14条件テスト純増5件、test_app_gui.py新規9件)。5回連続実行でフレーキーな失敗なし。
+- `pyflakes soloclarity tests`: 警告0件。
+- `python -m tests.bench_chain`: 平均0.7171〜0.7549ms/フレーム(10ms予算の7.1〜7.5%、閾値30%を大きく下回る)。
+- `python -m tests.soak_chain`(10万フレーム): RSS成長率1.007倍、処理時間比率1.035倍(いずれも閾値を大きく下回り、新たな問題なし)。
+- xvfb環境で実際にウィンドウを起動し、詳細設定パネルの「周囲の音を減らす」「打鍵音などを減らす」の表示・スクロール・スライダー変更→フィードバック表示→chain反映を確認した。
+- `app/はじめにお読みください.txt`・`app/WINDOWS_VERIFICATION_CHECKLIST.md`にDiscord自体のノイズ抑制と併用しないことを推奨する旨を追記し、古いプリセット名表記も更新した。
+- `docs/tasks.md`のT-006を「レビュー中」に更新した。
+
+### 次回開始位置
+- Reviewerによる敵対的検証を依頼する。特に14条件テストの閾値・警告(D-013記載のウォームアップに関する設計判断)、ライブ反映調査の結論、スクロール実装の妥当性を確認してもらう。
+- Windows実機・Discordでの実際の聞こえ方(インパクト音が「自然な範囲で残る」という主観評価を含む)は、この環境では引き続き検証不可能。`app/WINDOWS_VERIFICATION_CHECKLIST.md`に沿ったユーザー側での最終確認が必要。
+
 ## 記録フォーマット
 
 ```
