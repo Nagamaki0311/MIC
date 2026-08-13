@@ -1,9 +1,10 @@
 """1フレーム(480サンプル, 48kHz, float32 mono, -1.0..1.0)を処理するDSPチェーン。
 
-信号処理チェーン(仕様書 D-001 / docs/tasks.md T-001準拠):
-入力 -> HighpassFilter -> RNNoise denoise(発話確率取得、wet/dry blend)
-     -> EQ(PeakFilter束、明瞭度で強度可変) -> Compressor -> 自前AGC -> Limiter
-     -> 発話確率ゲート -> 出力
+信号処理チェーン(仕様書 D-001 / docs/tasks.md T-001準拠、D-012でwet/dry blendの
+混合比計算をバックグラウンド/インパクト2系統へ拡張):
+入力 -> HighpassFilter -> TransientDetector(混合比算出用) -> RNNoise denoise
+     (発話確率取得、wet/dry blend) -> EQ(PeakFilter束、明瞭度で強度可変)
+     -> Compressor -> 自前AGC -> Limiter -> 発話確率ゲート -> 出力
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from soloclarity import presets
 from soloclarity.dsp import rnnoise as rnnoise_mod
 from soloclarity.dsp.agc import AutomaticGainControl
 from soloclarity.dsp.gate import SpeechProbabilityGate
+from soloclarity.dsp.transient import TransientDetector
 
 FRAME_SIZE = rnnoise_mod.FRAME_SIZE
 SAMPLE_RATE = rnnoise_mod.SAMPLE_RATE
@@ -67,6 +69,7 @@ class VoiceChain:
     ):
         self._rnnoise_library = rnnoise_mod.RNNoiseLibrary(rnnoise_library_path)
         self._rnnoise_state = rnnoise_mod.RNNoiseState(self._rnnoise_library)
+        self._transient_detector = TransientDetector()
 
         self._highpass_board: pedalboard.Pedalboard
         self._eq_board: pedalboard.Pedalboard
@@ -130,12 +133,15 @@ class VoiceChain:
         assert frame.dtype == np.float32, f"frame dtype must be float32, got {frame.dtype}"
 
         highpassed = self._highpass_board.process(frame, SAMPLE_RATE, reset=False)
+        transient_score = self._transient_detector.process(highpassed)
 
         pcm16_scale = rnnoise_mod.float32_to_pcm16_scale(highpassed)
         denoised_pcm16, speech_prob = self._rnnoise_state.process(pcm16_scale)
         denoised = rnnoise_mod.pcm16_scale_to_float32(denoised_pcm16)
 
-        mix = self._noise_stage.wet_dry_mix
+        mix = self._noise_stage.background_wet_dry_mix * (1.0 - transient_score) + (
+            self._noise_stage.impact_wet_dry_mix * transient_score
+        )
         blended = denoised * mix + highpassed * (1.0 - mix)
 
         eq_out = self._eq_board.process(blended, SAMPLE_RATE, reset=False)

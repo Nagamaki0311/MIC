@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pedalboard
 import pytest
 
 from soloclarity.dsp import chain as chain_mod
@@ -31,6 +32,35 @@ def band_energy(signal: np.ndarray, sr: int, low_hz: float, high_hz: float) -> f
     freqs = np.fft.rfftfreq(len(signal), 1.0 / sr)
     mask = (freqs >= low_hz) & (freqs < high_hz)
     return float(np.sum(spectrum[mask] ** 2))
+
+
+def warm_up_chain(chain: VoiceChain, seed: int, amplitude: float = 0.03, n_frames: int = 120) -> None:
+    """定常ノイズをある程度流し、TransientDetector/AGC/ゲートの内部状態(EMA等)を
+    無音からの立ち上がり過渡(D-012のfast_env/slow_envがゼロ初期値から実信号レベルへ
+    収束するまでの区間)から抜けさせてから本題の検証を始めるためのヘルパー。
+    実際のマイク入力は常時ストリーミングされ続けるため、この過渡はテスト特有の
+    アーティファクトであり、これを除いた定常状態で比較する。"""
+    rng = np.random.default_rng(seed)
+    for _ in range(n_frames):
+        chain.process(rng.normal(0.0, amplitude, FRAME_SIZE).astype(np.float32))
+
+
+def make_colored_noise(n_samples: int, rng: np.random.Generator, amplitude: float, cutoff_hz: float) -> np.ndarray:
+    """ホワイトノイズにLowpassFilterをかけ、PCファン(広帯域)とは異なる
+    スペクトル形状(低域に偏った、エアコンの送風音を模した)ノイズを合成する。"""
+    board = pedalboard.Pedalboard([pedalboard.LowpassFilter(cutoff_hz)])
+    white = rng.normal(0.0, 1.0, n_samples).astype(np.float32)
+    filtered = board.process(white, SAMPLE_RATE)
+    filtered = filtered / (np.std(filtered) + 1e-9) * amplitude
+    return filtered.astype(np.float32)
+
+
+def inject_click(signal: np.ndarray, frame_index: int, rng: np.random.Generator, pulse_len: int = 5, amplitude_range: tuple[float, float] = (0.3, 0.6)) -> np.ndarray:
+    """1フレームの中央付近に短い高振幅パルス(打鍵音/クリック音を模した)を加える。"""
+    out = signal.copy()
+    pos = frame_index * FRAME_SIZE + FRAME_SIZE // 2
+    out[pos : pos + pulse_len] += rng.uniform(*amplitude_range, pulse_len).astype(np.float32)
+    return out
 
 
 @pytest.fixture
@@ -459,55 +489,177 @@ class TestQuietLowVoicePresetRealWorldScenarios:
 
     def test_case7_continuous_fan_like_noise_is_heavily_reduced(self, chain_factory):
         """条件7: PCファン等の連続ノイズ。定常ノイズのみの入力に対し、RNNoise+
-        新しいゲート設定によりエネルギーが大きく減衰することを確認する。"""
+        新しいゲート設定によりエネルギーが大きく減衰することを確認する。
+        あわせて、発話確率が低い区間ではAGCのゲイン更新が凍結される(D-002の
+        既存の仕組み)ことを直接確認する(「小さい声を持ち上げた結果、背景
+        ノイズまで大きくなっていないか」という敵対的観点)。"""
         chain = chain_factory(self.PRESET)
+        warm_up_chain(chain, seed=900)
         rng = np.random.default_rng(11)
 
         in_energy = 0.0
         out_energy = 0.0
+        prev_gain = chain.agc._gain
+        frozen_gain_violations = 0
         for _ in range(300):
             frame = rng.normal(0.0, 0.05, FRAME_SIZE).astype(np.float32)
+            out, prob = chain.process(frame)
+            if prob < chain.agc.freeze_speech_prob_threshold and chain.agc._gain != prev_gain:
+                frozen_gain_violations += 1
+            prev_gain = chain.agc._gain
+            in_energy += float(np.sum(frame**2))
+            out_energy += float(np.sum(out**2))
+
+        assert out_energy < in_energy * 0.1
+        assert frozen_gain_violations == 0, "AGC gain must not change while speech_prob is below the freeze threshold"
+
+    def test_case8_air_conditioner_like_noise_with_different_spectrum_is_heavily_reduced(self, chain_factory):
+        """条件8: エアコン等の連続ノイズ。PCファン(ホワイトノイズ)とはスペクトル
+        形状が異なる低域寄りのノイズ(LowpassFilter適用済み)に対しても、
+        エネルギーが大きく減衰することを確認する。"""
+        chain = chain_factory(self.PRESET)
+        warm_up_chain(chain, seed=901)
+        rng = np.random.default_rng(23)
+        n_frames = 300
+        ac_noise = make_colored_noise(n_frames * FRAME_SIZE, rng, amplitude=0.05, cutoff_hz=500.0)
+
+        in_energy = 0.0
+        out_energy = 0.0
+        for i in range(n_frames):
+            frame = ac_noise[i * FRAME_SIZE : (i + 1) * FRAME_SIZE]
             out, _ = chain.process(frame)
             in_energy += float(np.sum(frame**2))
             out_energy += float(np.sum(out**2))
 
         assert out_energy < in_energy * 0.1
 
-    def test_case8_intermittent_click_noise_is_suppressed_without_crashing(self, chain_factory):
-        """条件8: キーボード/マウス等の断続的ノイズ。短いクリック状の非周期
-        パルスを混ぜた合成音で、ノイズ区間のエネルギーが抑制されること、かつ
-        処理全体が例外なく完走することを確認する。"""
+    def test_case9_keyboard_click_is_suppressed_but_not_erased(self, chain_factory):
+        """条件9: キーボード打鍵(単発インパクト)。処理全体が例外なく完走し、
+        かつimpact_wet_dry_mix(strong=0.35)による抑制後も、もし
+        background_wet_dry_mix(strong=1.00)がそのまま適用された場合(=分離
+        なしの旧挙動)と比べて明らかに多くのエネルギーが残ることを確認する
+        (バックグラウンド/インパクト2系統分離が実際に機能していることの
+        直接証明)。"""
+
+        def run_clicks(chain: VoiceChain, seed: int) -> tuple[float, float]:
+            rng = np.random.default_rng(seed)
+            n_frames = 200
+            click_frame_indices = set(rng.choice(n_frames, size=20, replace=False).tolist())
+            click_in_energy = 0.0
+            click_out_energy = 0.0
+            for i in range(n_frames):
+                frame = rng.normal(0.0, 0.002, FRAME_SIZE).astype(np.float32)
+                is_click = i in click_frame_indices
+                if is_click:
+                    click_pos = int(rng.integers(0, FRAME_SIZE - 10))
+                    frame[click_pos : click_pos + 5] += rng.uniform(0.3, 0.6, 5).astype(np.float32)
+                out, _ = chain.process(frame)  # 例外が出ず完走すること自体も確認
+                if is_click:
+                    click_in_energy += float(np.sum(frame**2))
+                    click_out_energy += float(np.sum(out**2))
+            return click_in_energy, click_out_energy
+
         chain = chain_factory(self.PRESET)
-        rng = np.random.default_rng(13)
+        warm_up_chain(chain, seed=777, amplitude=0.002)
+        _, click_out_energy = run_clicks(chain, seed=13)
 
-        n_frames = 200
-        click_frame_indices = set(rng.choice(n_frames, size=20, replace=False).tolist())
-        click_in_energy = 0.0
-        click_out_energy = 0.0
+        no_separation_chain = chain_factory(self.PRESET)
+        stage = presets.NOISE_STAGES[presets.PRESETS[self.PRESET].noise]
+        no_separation_chain.set_noise_stage(
+            presets.NoiseStage(
+                background_wet_dry_mix=stage.background_wet_dry_mix,
+                impact_wet_dry_mix=stage.background_wet_dry_mix,  # 分離なし(旧挙動)を再現
+                gate_threshold=stage.gate_threshold,
+                gate_release_ms=stage.gate_release_ms,
+            )
+        )
+        warm_up_chain(no_separation_chain, seed=777, amplitude=0.002)
+        _, no_separation_click_out_energy = run_clicks(no_separation_chain, seed=13)
+
+        assert click_out_energy > no_separation_click_out_energy * 5.0, (
+            "impact_wet_dry_mix separation should retain far more click energy than "
+            "applying background_wet_dry_mix uniformly"
+        )
+
+    def test_case10_mouse_click_is_sharper_and_also_not_erased(self, chain_factory):
+        """条件10: マウスクリック(単発インパクト、打鍵より短い/鋭いパルス)。
+        条件9と同じ観点(分離なしと比べて明らかに多くのエネルギーが残る)を、
+        より短いパルス幅(2サンプル)で確認する。"""
+
+        def run_clicks(chain: VoiceChain, seed: int) -> tuple[float, float]:
+            rng = np.random.default_rng(seed)
+            n_frames = 200
+            click_frame_indices = set(rng.choice(n_frames, size=20, replace=False).tolist())
+            click_in_energy = 0.0
+            click_out_energy = 0.0
+            for i in range(n_frames):
+                frame = rng.normal(0.0, 0.002, FRAME_SIZE).astype(np.float32)
+                is_click = i in click_frame_indices
+                if is_click:
+                    click_pos = int(rng.integers(0, FRAME_SIZE - 3))
+                    frame[click_pos : click_pos + 2] += rng.uniform(0.4, 0.7, 2).astype(np.float32)
+                out, _ = chain.process(frame)
+                if is_click:
+                    click_in_energy += float(np.sum(frame**2))
+                    click_out_energy += float(np.sum(out**2))
+            return click_in_energy, click_out_energy
+
+        chain = chain_factory(self.PRESET)
+        warm_up_chain(chain, seed=555, amplitude=0.002)
+        _, click_out_energy = run_clicks(chain, seed=29)
+
+        no_separation_chain = chain_factory(self.PRESET)
+        stage = presets.NOISE_STAGES[presets.PRESETS[self.PRESET].noise]
+        no_separation_chain.set_noise_stage(
+            presets.NoiseStage(
+                background_wet_dry_mix=stage.background_wet_dry_mix,
+                impact_wet_dry_mix=stage.background_wet_dry_mix,
+                gate_threshold=stage.gate_threshold,
+                gate_release_ms=stage.gate_release_ms,
+            )
+        )
+        warm_up_chain(no_separation_chain, seed=555, amplitude=0.002)
+        _, no_separation_click_out_energy = run_clicks(no_separation_chain, seed=29)
+
+        assert click_out_energy > no_separation_click_out_energy * 5.0
+
+    def test_case11_multiple_environmental_noises_are_heavily_reduced(self, chain_factory):
+        """条件11: 複数の環境音(PCファン風のホワイトノイズ+エアコン風の低域
+        ノイズを重ねる)。単独の定常ノイズと同様にエネルギーが大きく減衰する
+        ことを確認する。"""
+        chain = chain_factory(self.PRESET)
+        warm_up_chain(chain, seed=902)
+        n_frames = 300
+        rng_fan = np.random.default_rng(51)
+        rng_ac = np.random.default_rng(52)
+        fan = rng_fan.normal(0.0, 0.04, n_frames * FRAME_SIZE).astype(np.float32)
+        ac = make_colored_noise(n_frames * FRAME_SIZE, rng_ac, amplitude=0.04, cutoff_hz=500.0)
+        combined = fan + ac
+
+        in_energy = 0.0
+        out_energy = 0.0
         for i in range(n_frames):
-            frame = rng.normal(0.0, 0.002, FRAME_SIZE).astype(np.float32)
-            is_click = i in click_frame_indices
-            if is_click:
-                click_pos = int(rng.integers(0, FRAME_SIZE - 10))
-                frame[click_pos : click_pos + 5] += rng.uniform(0.3, 0.6, 5).astype(np.float32)
-            out, _ = chain.process(frame)  # 例外が出ず完走すること自体も確認
-            if is_click:
-                click_in_energy += float(np.sum(frame**2))
-                click_out_energy += float(np.sum(out**2))
+            frame = combined[i * FRAME_SIZE : (i + 1) * FRAME_SIZE]
+            out, _ = chain.process(frame)
+            in_energy += float(np.sum(frame**2))
+            out_energy += float(np.sum(out**2))
 
-        assert click_out_energy < click_in_energy * 0.1
+        assert out_energy < in_energy * 0.1
 
-    def test_case9_speech_over_noise_keeps_more_energy_than_noise_alone(self, chain_factory):
-        """条件9: 声とノイズが同時に存在する状態。ノイズのみの区間と比べて
-        エネルギーが十分保たれる(声が丸ごと消えていない)ことを確認する。
-        新しいgate_threshold(0.25、旧0.45)が緩和されたことの効果を検証する
-        重要なケース。"""
+    def test_case12_speech_over_noise_keeps_more_energy_than_noise_alone(self, chain_factory):
+        """条件12: 環境音+小さい低い声。ノイズのみの区間と比べてエネルギーが
+        十分保たれる(声が丸ごと消えていない)ことを確認する。新しい
+        gate_threshold(0.25、旧0.45)が緩和されたことの効果を検証する重要な
+        ケース。TransientDetectorがEMAのゼロ初期値から実信号レベルへ収束する
+        までの過渡(D-012)の影響を除くため、両チェーンとも同じ定常ノイズで
+        ウォームアップしてから比較する。"""
         sr = SAMPLE_RATE
         n_frames = 80
         amplitude = 10 ** (-20.0 / 20.0)
         speech = make_low_voice_signal(n_frames * FRAME_SIZE, sr=sr, f0=150.0, amplitude=amplitude)
 
         noise_only_chain = chain_factory(self.PRESET)
+        warm_up_chain(noise_only_chain, seed=999, amplitude=0.03)
         rng_noise_only = np.random.default_rng(17)
         noise_only_out_energy = 0.0
         for _ in range(n_frames):
@@ -516,6 +668,7 @@ class TestQuietLowVoicePresetRealWorldScenarios:
             noise_only_out_energy += float(np.sum(out**2))
 
         speech_plus_noise_chain = chain_factory(self.PRESET)
+        warm_up_chain(speech_plus_noise_chain, seed=999, amplitude=0.03)
         rng_same_noise = np.random.default_rng(17)  # ノイズ系列を再現して条件を揃える
         speech_plus_noise_out_energy = 0.0
         for i in range(n_frames):
@@ -525,3 +678,78 @@ class TestQuietLowVoicePresetRealWorldScenarios:
             speech_plus_noise_out_energy += float(np.sum(out**2))
 
         assert speech_plus_noise_out_energy > noise_only_out_energy * 10.0
+
+    def test_case13_keyboard_click_does_not_destroy_nearby_speech(self, chain_factory):
+        """条件13: 打鍵音+小さい低い声。打鍵音を処理する(抑制する)ことで、
+        その直前・直後にある声の部分のエネルギーが大きく損なわれていないかを
+        確認する。打鍵音より前のフレームは因果的に打鍵音の影響を受けないため
+        厳密に一致すること(ウォームアップ後の決定論的な等価性)、直後の
+        数フレームは声のエネルギーが失われていないこと(クリックなしの
+        基準と比べて十分保たれること)を検証する。"""
+        sr = SAMPLE_RATE
+        n_frames = 60
+        amplitude = 10 ** (-32.0 / 20.0)  # 小さい声(条件1と同じ音量)
+        speech = make_low_voice_signal(n_frames * FRAME_SIZE, sr=sr, f0=110.0, amplitude=amplitude)
+
+        click_frame = 40
+        rng = np.random.default_rng(41)
+        speech_with_click = inject_click(speech, click_frame, rng)
+
+        baseline_chain = chain_factory(self.PRESET)
+        warm_up_chain(baseline_chain, seed=1, amplitude=0.002)
+        baseline_energy: dict[int, float] = {}
+        for i in range(n_frames):
+            frame = speech[i * FRAME_SIZE : (i + 1) * FRAME_SIZE]
+            out, _ = baseline_chain.process(frame.astype(np.float32))
+            baseline_energy[i] = float(np.sum(out**2))
+
+        click_chain = chain_factory(self.PRESET)
+        warm_up_chain(click_chain, seed=1, amplitude=0.002)
+        click_energy: dict[int, float] = {}
+        for i in range(n_frames):
+            frame = speech_with_click[i * FRAME_SIZE : (i + 1) * FRAME_SIZE]
+            out, _ = click_chain.process(frame.astype(np.float32))
+            click_energy[i] = float(np.sum(out**2))
+
+        # 打鍵音より前のフレームは因果的に無関係であり、厳密に一致するはず。
+        for i in range(click_frame):
+            assert click_energy[i] == baseline_energy[i], (
+                f"frame {i} (before the click) must be unaffected by a later click"
+            )
+
+        # 打鍵音の直後(声が続いている区間)のエネルギーが、クリックなしの基準と
+        # 比べて大きく損なわれていない(半分未満に落ち込んでいない)こと。
+        after_click_baseline = sum(baseline_energy[i] for i in range(click_frame + 1, click_frame + 4))
+        after_click_with_click = sum(click_energy[i] for i in range(click_frame + 1, click_frame + 4))
+        assert after_click_with_click > after_click_baseline * 0.5, (
+            "speech energy right after a keyboard click should not collapse"
+        )
+
+    def test_case14_environment_noise_plus_click_plus_quiet_low_voice_stays_robust(self, chain_factory):
+        """条件14: 環境音+打鍵音+小さい低い声(3要素が重なる最も厳しい条件)。
+        出力がリミッターceilingを超えない、shape/dtypeが壊れない、例外が出ない
+        ことを確認する。"""
+        sr = SAMPLE_RATE
+        ceiling_linear = 10 ** (presets.LIMITER_CEILING_DBFS / 20.0)
+        n_frames = 100
+        amplitude = 10 ** (-32.0 / 20.0)
+        speech = make_low_voice_signal(n_frames * FRAME_SIZE, sr=sr, f0=110.0, amplitude=amplitude)
+
+        rng_noise = np.random.default_rng(61)
+        noise = rng_noise.normal(0.0, 0.05, n_frames * FRAME_SIZE).astype(np.float32)
+
+        rng_click = np.random.default_rng(62)
+        click_frames = set(rng_click.choice(range(10, n_frames - 5), size=5, replace=False).tolist())
+        combined = speech + noise
+        for cf in click_frames:
+            combined = inject_click(combined, cf, rng_click)
+
+        chain = chain_factory(self.PRESET)
+        warm_up_chain(chain, seed=903)
+        for i in range(n_frames):
+            frame = combined[i * FRAME_SIZE : (i + 1) * FRAME_SIZE].astype(np.float32)
+            out, speech_prob = chain.process(frame)  # 例外が出ず完走すること自体も確認
+            assert out.shape == (FRAME_SIZE,)
+            assert out.dtype == np.float32
+            assert 0.0 <= speech_prob <= 1.0
+            assert np.max(np.abs(out)) <= ceiling_linear + 1e-6
