@@ -2,20 +2,34 @@
 
 信号処理チェーン(仕様書 D-001 / docs/tasks.md T-001準拠、D-012でwet/dry blendの
 混合比計算をバックグラウンド/インパクト2系統へ拡張):
-入力 -> HighpassFilter -> TransientDetector(混合比算出用) -> RNNoise denoise
-     (発話確率取得、wet/dry blend) -> EQ(PeakFilter束、明瞭度で強度可変)
-     -> Compressor -> 自前AGC -> Limiter -> 発話確率ゲート -> 出力
+入力 -> HighpassFilter -> dry遅延バッファ(RNNoise出力遅延に整列) -> TransientDetector
+     (整列後dryに対して混合比算出) -> RNNoise denoise(発話確率取得、wet/dry blend)
+     -> EQ(PeakFilter束、明瞭度で強度可変) -> Compressor -> 自前AGC -> Limiter
+     -> 発話確率ゲート -> 出力
 
-D-015: RNNoiseの入出力遅延はrnnoise_process_frameへの実測(チャープ信号の相互相関、
-複数周波数での位相ベースgroup delay測定、tests/test_rnnoise_wrapper.py参照)で
-0サンプルと確認されたため、dry/wetパスの時間整列(1フレーム遅延バッファ)は
-実施していない(Step0-1で「遅延なし」を確認した場合はスキップする、という
-承認済み方針どおり)。発話状態(発話中か)の判定はSpeechActivityTracker
-(gate.py)へ一元化し、AGC・ゲートの両方がこれを共有する。
+D-015 Reviewer差し戻し(1巡目)対応: RNNoiseの入出力遅延について、旧実装(初回の
+Step0-1実測)は「0サンプル」と結論しdry/wet整列を不要としていたが、この測定は
+`RNNoiseState.process()`のin-place破壊的挙動によるテスト側のバグ(rnnoise.py
+docstring参照)によるものだった。再測定(3つの独立した手法、
+tests/test_rnnoise_wrapper.py参照)により、RNNoiseの出力は入力に対し
+`rnnoise_mod.OUTPUT_DELAY_FRAMES`(2フレーム, 20ms)遅れることを確認した。
+`process()`が返すdenoisedフレームは、その`OUTPUT_DELAY_FRAMES`フレーム前に
+highpass後の信号として渡した内容に対応する。この時間差を無視してdenoisedと
+現在のhighpassed(dry)を直接blendすると、0<mix<1の間コムフィルタ
+(周期1/OUTPUT_DELAY_SAMPLES秒のノッチ列)が発生する。これを避けるため、
+`VoiceChain`はdry信号(highpassed)を`OUTPUT_DELAY_FRAMES`フレーム分のバッファへ
+通してから、対応する時刻のdenoised出力とblendする。TransientDetectorも
+blendに使う整列後のdry信号に対して計算する(混合比の算出対象と実際に混合する
+信号の時刻を一致させるため)。出力全体の遅延がOUTPUT_DELAY_FRAMES分
+(20ms)追加される(docs/decisions.md D-015参照)。
+
+発話状態(発話中か)の判定はSpeechActivityTracker(gate.py)へ一元化し、
+AGC・ゲートの両方がこれを共有する。
 """
 
 from __future__ import annotations
 
+from collections import deque
 from typing import Optional
 
 import numpy as np
@@ -29,6 +43,20 @@ from soloclarity.dsp.transient import TransientDetector
 
 FRAME_SIZE = rnnoise_mod.FRAME_SIZE
 SAMPLE_RATE = rnnoise_mod.SAMPLE_RATE
+
+# D-015: RNNoiseのdenoised出力は入力よりこのフレーム数だけ遅れる(実測値、
+# rnnoise.OUTPUT_DELAY_FRAMES参照)。dry側をこのフレーム数だけ遅延させて整列する。
+DRY_DELAY_FRAMES = rnnoise_mod.OUTPUT_DELAY_FRAMES
+
+# D-015 Reviewer差し戻し(1巡目)対応で判明した副作用: dry/wet整列により、無音直後の
+# 瞬間的なフルスケール立ち上がり(instant step transient)に対してpedalboard.Limiterの
+# アタックが1フレーム分間に合わず、ceilingを超えるオーバーシュートを出すことがある
+# (整列前は偶然タイミングがずれてこの弱点が露呈していなかっただけで、Limiter単体でも
+# 再現する挙動。tests/test_chain.pyのtest_output_never_exceeds_limiter_ceiling参照)。
+# Limiterは「Discord側のクリップを防ぐ安全弁」(モジュールdocstring参照)である以上、
+# ceilingを実際に保証する必要があるため、Limiter出力に対する最終的なハードクリップを
+# 安全網として追加する。
+LIMITER_CEILING_LINEAR = 10.0 ** (presets.LIMITER_CEILING_DBFS / 20.0)
 
 
 def _build_highpass_board(cutoff_hz: float) -> pedalboard.Pedalboard:
@@ -77,6 +105,14 @@ class VoiceChain:
         self._rnnoise_library = rnnoise_mod.RNNoiseLibrary(rnnoise_library_path)
         self._rnnoise_state = rnnoise_mod.RNNoiseState(self._rnnoise_library)
         self._transient_detector = TransientDetector()
+        # D-015: dry(highpassed)信号をRNNoiseの出力遅延ぶん遅延させ、denoisedと
+        # 時間整列させるためのバッファ。無音で初期化する(起動直後の数フレームは
+        # 整列先が無音になる=追加のstartup latencyだが、悪化ではなく既存のjitter
+        # buffer primingと同種のトレードオフ)。
+        self._dry_delay_buffer: deque[np.ndarray] = deque(
+            (np.zeros(FRAME_SIZE, dtype=np.float32) for _ in range(DRY_DELAY_FRAMES)),
+            maxlen=DRY_DELAY_FRAMES,
+        )
 
         self._highpass_board: pedalboard.Pedalboard
         self._eq_board: pedalboard.Pedalboard
@@ -165,22 +201,30 @@ class VoiceChain:
         assert frame.dtype == np.float32, f"frame dtype must be float32, got {frame.dtype}"
 
         highpassed = self._highpass_board.process(frame, SAMPLE_RATE, reset=False)
-        transient_score = self._transient_detector.process(highpassed)
 
         pcm16_scale = rnnoise_mod.float32_to_pcm16_scale(highpassed)
         denoised_pcm16, speech_prob = self._rnnoise_state.process(pcm16_scale)
         denoised = rnnoise_mod.pcm16_scale_to_float32(denoised_pcm16)
 
+        # D-015: denoised(このprocess()呼び出しの戻り値)はDRY_DELAY_FRAMES前に
+        # highpassedとして渡した信号に対応する。dry側を同じ時刻へ整列させてから
+        # blendする(コムフィルタの回帰テスト: tests/test_chain.py参照)。
+        aligned_dry = self._dry_delay_buffer.popleft()
+        self._dry_delay_buffer.append(highpassed)
+
+        transient_score = self._transient_detector.process(aligned_dry)
+
         mix = self._noise_stage.background_wet_dry_mix * (1.0 - transient_score) + (
             self._noise_stage.impact_wet_dry_mix * transient_score
         )
-        blended = denoised * mix + highpassed * (1.0 - mix)
+        blended = denoised * mix + aligned_dry * (1.0 - mix)
 
         eq_out = self._eq_board.process(blended, SAMPLE_RATE, reset=False)
         comp_out = self._compressor_board.process(eq_out, SAMPLE_RATE, reset=False)
         speech_active = self._speech_tracker.update(speech_prob)
         agc_out = self.agc.process(comp_out, speech_active)
         limited = self._limiter_board.process(agc_out, SAMPLE_RATE, reset=False)
+        limited = np.clip(limited, -LIMITER_CEILING_LINEAR, LIMITER_CEILING_LINEAR)
         gated = self.gate.apply(limited, speech_active)
 
         return gated.astype(np.float32), speech_prob

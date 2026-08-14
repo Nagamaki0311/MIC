@@ -750,3 +750,27 @@ Step0の実測により、上記「決定」1(dry/wetパスの時間整列)の�
 1. `test_rnnoise_wrapper.py`の遅延測定テストで`state.process()`へ渡すフレームを`.copy()`し、エイリアシングを断つ。`RNNoiseState.process()`自体もin-place破壊的処理であることをdocstringに明記するか、内部で防御的にコピーする。
 2. 修正後の測定方法で真の遅延量を再確定し、Step1(dry/wetパスの時間整列、1フレーム遅延バッファをdry側に挿入)の実施要否を再判断する(今回の実測(約2フレーム)が再現するなら実施が必要)。
 3. `AutomaticGainControl.set_params()`(または`process()`の凍結分岐)で、既存の`self._gain`を新しい`min_gain_linear`/`max_gain_linear`へクランプし直す。
+
+### 実装追記(Developer, 2026-08-14): Reviewer差し戻し(1巡目)対応の実装内容
+
+**1. `test_rnnoise_wrapper.py`の測定バグ修正**: 全ての遅延測定テストで`state.process()`へ渡す前にフレームを`.copy()`し、エイリアシング(`np.ascontiguousarray`がビューを返すことによる呼び出し元配列の意図しない書き換え)を断った。`RNNoiseState.process()`(`rnnoise.py`)のdocstringに、in-place破壊的処理である旨と、呼び出し元が配列を保持したい場合は`.copy()`が必要である旨を明記した(`chain.py`は`float32_to_pcm16_scale`が乗算により毎回新規配列を確保するため影響を受けないことも明記)。内部での防御的コピー追加は、既存の`chain.py`の呼び出し方(既に新規配列)を前提にするとパフォーマンス上不要と判断し、docstring明記のみとした。
+
+**2. 真の遅延量の再確定**: 3つの独立した手法で再測定し、いずれも**2フレーム(960サンプル、20ms)**で一致した。
+   - 広帯域チャープ信号(100-4000Hz、10秒)の相互相関: 探索窓をEXPECTED_DELAY_SAMPLES(960)+4フレーム分まで広げて再測定した結果、lag=960で唯一の鋭いピーク(相関値496092、隣接lag959/961は467000台)。
+   - インパルス応答的なバースト注入(短い高振幅パルスを孤立無音区間に注入しオンセット位置を検出): RNNoiseは音声らしくない孤立クリックの多くを抑圧するため全試行で検出はできなかったが、検出できた試行(15試行中2〜3回)はいずれも正確に960サンプル一致した。
+   - 位相ベースgroup delay測定(位相ラップ=2πの整数倍の不定性をEXPECTED_DELAY_SAMPLES近傍で解決): 150/300/500/800/1200Hzの5周波数でいずれも930〜1005サンプル(誤差要因は位相測定分解能)の範囲に収まり、960サンプル説を支持した。
+   - 副次的な発見: Step0-1初回測定の「amplitude ratio ~1.000(RNNoiseは十分な音量の純音をほぼ無加工で通す)」という結論も、同じin-placeエイリアシングバグの影響を受けていたため誤りだった(x=sigとy=outputが実質同一配列だったため)。正しく測定し直すと、**変調のない定常な純音(ビブラート等が無い一定周波数のサイン波)はRNNoiseに強く抑圧される(2秒の定常区間で60dB超の減衰)**。これはコムフィルタの回帰テスト設計にも影響し(後述4番)、ホワイトノイズや純音ではなくRNNoiseがほぼ無加工で通す音声様信号(`make_voice_like_signal`)を使う必要があると判明した。
+
+**3. dry/wetパスの時間整列を実装**: `chain.py`に`DRY_DELAY_FRAMES = rnnoise_mod.OUTPUT_DELAY_FRAMES`(2)ぶんのdry(highpassed)信号遅延バッファ(`deque`、起動時は無音で初期化)を追加した。`process()`内で、RNNoiseの`process()`が返すdenoisedフレームは`DRY_DELAY_FRAMES`前に渡したhighpassedフレームに対応するため、`aligned_dry = self._dry_delay_buffer.popleft()`で時刻を合わせたdry信号を取り出してから`blended = denoised*mix + aligned_dry*(1-mix)`を計算するよう変更した。`TransientDetector`も整列後の`aligned_dry`に対して計算するよう変更した(元のPlannerの計画どおり)。出力全体の遅延が2フレーム(20ms)追加される(既存のjitter buffer priming追加分と合わせ、合計の追加遅延は許容範囲内、D-015「決定」7参照)。
+
+**3-a. 副次的に発覚したLimiterのオーバーシュート問題への対応**: dry/wet整列の導入により、無音直後の瞬間的なフルスケール立ち上がり(instant step transient、既存回帰テスト`test_output_never_exceeds_limiter_ceiling`のシナリオ)で`pedalboard.Limiter`単体のアタックが1フレーム分間に合わず、ceiling(-1.0dBFS)を最大+0.45dB超えるオーバーシュートを出すことが判明した(Limiter単体でも再現する挙動であり、整列前は偶然タイミングがずれてこの弱点が既存テストで露呈していなかっただけと判断した)。Limiterは「Discord側のクリップを防ぐ安全弁」という設計意図(モジュールdocstring参照)を持つため、`limited = np.clip(limited, -LIMITER_CEILING_LINEAR, LIMITER_CEILING_LINEAR)`をLimiter出力に対する最終的なハードクリップとして追加し、ceilingを実際に保証するようにした。
+
+**4. 回帰テストの追加・修正**:
+   - `test_rnnoise_wrapper.py`: 全遅延測定テストを`.copy()`ベースに修正し、期待遅延`EXPECTED_DELAY_SAMPLES=rn.OUTPUT_DELAY_SAMPLES`(960)との一致を検証する形へ変更した。位相ラップ解決を追加したgroup delay測定、探索窓を広げた広帯域相互相関に加え、新たにバースト注入によるオンセット検出テストを追加し、3手法体制にした。
+   - `test_chain.py`に`TestDryWetTimeAlignment`を追加した。純粋なホワイトノイズはRNNoiseにほぼ完全抑圧され(実測60dB超減衰)コムフィルタの検証に使えないと判明したため、`make_voice_like_signal`(RNNoiseがほぼ無加工で通す声様信号)を使い、EQ/Compressor/AGC/Gateの影響を実質無効化した`VoiceChain`(`mix`固定0.5)で各倍音のゲイン(dry-onlyリファレンス比、dB)のばらつきが3dB未満であることを確認する。手元で修正前のコードに対して同じテストを実行すると倍音間ゲイン変動が最大11.6dB(第2次倍音-8.45dB、第3次倍音-11.79dBの深いノッチ)に達し失敗することを確認した。
+   - `test_agc.py`に`test_set_params_clamps_existing_gain_to_new_max_when_speech_is_inactive`を追加した。`quiet_low_voice`相当のmax_gain(12dB)まで収束させた後、発話非アクティブのまま`natural`相当のmax_gain(6dB)へ`set_params`し、即座にクランプされることを確認する。手元で修正前のコードに対して実行すると失敗する(ゲインが12dB相当のまま維持される)ことを確認した。
+   - `test_app_gui.py`の`TestAdvancedSliderChangesReflectLiveInAudioEngine::test_input_callback_output_changes_after_slider_moves`が、dry/wet整列バッファ追加による起動直後の追加無音区間(jitter bufferのpriming 2フレームと合わせ、実質4フレーム分)により偶発的にfalse-failするようになったため、`_process_settled`ヘルパー(同一フレームを複数回流し両方のバッファを通過させてから比較する)へ変更した。
+
+**5. テスト結果**: `pytest tests/`(soak_chain.py除く)144 passed(既存141件+新規3件相当。内訳: `test_chain.py`に`TestDryWetTimeAlignment`1件、`test_agc.py`に1件、`test_rnnoise_wrapper.py`は遅延テスト3件を維持しつつバースト注入1件を新規追加、既存2件を書き換え)、3回連続実行でフレーキーな失敗なし。`pyflakes soloclarity tests`警告0件。`python -m tests.bench_chain`は1フレームあたり平均1.22ms(予算10msの12.2%、閾値30%未満を維持)。
+
+**未解決の懸念**: dry/wet整列バッファの導入により出力全体の遅延がさらに2フレーム(20ms)増加した(jitter buffer priming分と合わせた累積遅延の実機体感確認は`WINDOWS_VERIFICATION_CHECKLIST.md`の既存項目でカバーされる範囲内と判断しているが、Reviewerによる再検証を推奨する)。Limiterのハードクリップ追加は、瞬間的なフルスケール立ち上がりというまれなシナリオでのみ発動する安全網であり、通常の音声レベルでは影響しない(`test_limiter_barely_attenuates_normal_level_signal`が引き続きpassすることで確認済み)。

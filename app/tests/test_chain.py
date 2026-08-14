@@ -439,6 +439,89 @@ class TestLimiterEngagementFrequency:
         assert out_rms / raw_rms > 0.98
 
 
+class TestDryWetTimeAlignment:
+    """D-015 Reviewer差し戻し(1巡目): denoised(wet)とhighpassed(dry)の時間整列が
+    実際にコムフィルタを解消していることを、mix=0.5固定のスペクトル解析で確認する。
+
+    純粋なホワイトノイズはRNNoiseにほぼ完全に抑圧され(実測60dB超の減衰)denoised側の
+    寄与が無視できるほど小さくなるため、コムフィルタの検証には向かない。RNNoiseが
+    ほぼ無加工で通す(D-015 Step0-2参照)`make_voice_like_signal`(声を模した
+    倍音構造を持つ信号)を使い、各倍音での実測ゲイン(dry-onlyリファレンスとの比、dB)が
+    倍音間で滑らかである(=コムフィルタ由来の周期的なノッチが無い)ことを確認する。
+
+    EQ/Compressor/AGC/Gate/Limiterが持つそれぞれの周波数整形・時間変化する影響を
+    排除するため、これらを実質的に無効化した(EQをバイパス、Compressor比1:1、AGCを
+    ゲイン固定、ゲートを常時オープン)`VoiceChain`を使い、dry/wet整列そのものの効果を
+    本番コードパス(`VoiceChain.process()`)を通して直接検証する。
+    """
+
+    F0 = 110.0
+
+    @staticmethod
+    def _build_neutral_chain(chain_factory, mix: float) -> VoiceChain:
+        """EQ/Compressor/AGC/Gateの影響をほぼ無効化し、dry/wet blendの効果だけを
+        観測できるようにしたチェーンを作る。"""
+        chain = chain_factory("natural")
+        chain.set_clarity_stage(presets.ClarityStage(highpass_hz=20.0, bands=()))
+        chain.set_noise_stage(
+            presets.NoiseStage(
+                background_wet_dry_mix=mix, impact_wet_dry_mix=mix, gate_threshold=0.0, gate_release_ms=50.0
+            )
+        )
+        chain.set_compressor(presets.CompressorParams(threshold_db=0.0, ratio=1.0, attack_ms=1.0, release_ms=1.0))
+        chain.set_agc(presets.AgcParams(target_dbfs=-17.0, max_gain_db=0.0))  # ゲインを1.0に固定
+        return chain
+
+    @classmethod
+    def _harmonic_gains_db(cls, chain_factory) -> np.ndarray:
+        n_harmonics = max(3, round(700.0 / cls.F0))
+        raw = make_voice_like_signal(6 * SAMPLE_RATE, f0=cls.F0, amplitude=0.2, seed=3)
+
+        def harmonic_mags_db(seg: np.ndarray) -> np.ndarray:
+            n = len(seg)
+            spectrum = np.fft.rfft(seg * np.hanning(n))
+            freqs = np.fft.rfftfreq(n, 1.0 / SAMPLE_RATE)
+            mags = []
+            for h in range(1, n_harmonics + 1):
+                idx = int(np.argmin(np.abs(freqs - h * cls.F0)))
+                mags.append(20.0 * np.log10(np.abs(spectrum[idx]) + 1e-9))
+            return np.array(mags)
+
+        def process_all(chain: VoiceChain) -> np.ndarray:
+            outputs = []
+            for i in range(0, len(raw), FRAME_SIZE):
+                out, _ = chain.process(raw[i : i + FRAME_SIZE])
+                outputs.append(out)
+            return np.concatenate(outputs)
+
+        warmup_samples = int(1.0 * SAMPLE_RATE)  # AGC/ゲートの立ち上がり過渡を除く
+
+        dry_only_chain = cls._build_neutral_chain(chain_factory, mix=0.0)
+        dry_mags = harmonic_mags_db(process_all(dry_only_chain)[warmup_samples:])
+
+        blended_chain = cls._build_neutral_chain(chain_factory, mix=0.5)
+        blended_mags = harmonic_mags_db(process_all(blended_chain)[warmup_samples:])
+
+        return blended_mags - dry_mags
+
+    def test_blend_gain_is_flat_across_harmonics_no_comb_notches(self, chain_factory):
+        """整列済みのdry/wet blendでは、各倍音でのゲイン(dB)がほぼ一定であること
+        (=周期的なノッチが無いこと)を確認する。
+
+        整列前(D-015 Reviewer差し戻し前のバグ)では、この同じ検証で最大約11.6dBの
+        倍音間ゲイン変動(第2次倍音で-8.45dB、第3次倍音で-11.79dBの深いノッチ)が
+        観測されていた(手元での修正前コードに対する実行結果)。修正後は倍音間の
+        ゲイン変動が1dB未満に収まる。
+        """
+        gains_db = self._harmonic_gains_db(chain_factory)
+        ripple_db = float(np.ptp(gains_db))
+        assert ripple_db < 3.0, (
+            f"harmonic gain ripple {ripple_db:.2f}dB (per-harmonic gains={np.round(gains_db, 2)}) "
+            "suggests a comb filter between dry and wet paths; revisit dry/wet time alignment "
+            "in chain.py (docs/decisions.md D-015)."
+        )
+
+
 class TestQuietLowVoicePresetRealWorldScenarios:
     """quiet_low_voiceプリセット(D-015再設計後)を、ユーザーが指定した16の想定
     利用シーンそれぞれについて合成信号で検証する(docs/decisions.md D-015参照)。

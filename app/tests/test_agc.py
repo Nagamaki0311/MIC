@@ -97,6 +97,29 @@ def test_gain_is_applied_as_a_within_frame_ramp_not_a_step():
     assert not np.allclose(ratios, ratios[0], atol=1e-6), "gain should ramp within the frame, not step"
 
 
+def test_set_params_clamps_existing_gain_to_new_max_when_speech_is_inactive():
+    """D-015 Reviewer差し戻し(1巡目): プリセット切替でmax_gain_dbがより小さい値へ
+    変わった直後、発話が非アクティブ(凍結中)でも、旧プリセットで収束した(より
+    大きい)ゲインが新プリセットの範囲へ即座にクランプされることを確認する。
+    """
+    agc = AutomaticGainControl(target_dbfs=-16.0, max_gain_db=12.0, attack_seconds=0.1, release_seconds=0.5)
+    very_quiet_amplitude = 10 ** (-60.0 / 20.0)
+    for i in range(200):
+        agc.process(_make_tone_frame(very_quiet_amplitude, i), speech_active=True)
+    old_max_gain_linear = 10 ** (12.0 / 20.0)
+    assert agc._gain > 10 ** (6.0 / 20.0)  # 前提: 旧プリセットの上限(12dB)近くまで収束している
+    assert agc._gain <= old_max_gain_linear + 1e-9
+
+    # natural相当(max_gain_db=6.0)へ切り替え、発話は非アクティブ(凍結中)のまま。
+    agc.set_params(target_dbfs=-20.0, max_gain_db=6.0, attack_seconds=0.4, release_seconds=1.5)
+    new_max_gain_linear = 10 ** (6.0 / 20.0)
+    assert agc._gain <= new_max_gain_linear + 1e-9
+
+    # 凍結中でも(speech_active=False)クランプ後のゲインが維持され、範囲を超えない。
+    agc.process(_make_tone_frame(very_quiet_amplitude, 200), speech_active=False)
+    assert agc._gain <= new_max_gain_linear + 1e-9
+
+
 class TestAgcConvergenceSpeed:
     """D-015: attack/releaseを2.0s/4.0sから0.4s/1.5sへ短縮し、数秒の発話内で
     target±3dBへ収束できることを実測で確認する(旧時定数では収束しなかったケース)。

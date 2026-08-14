@@ -18,6 +18,14 @@ import numpy as np
 FRAME_SIZE = 480  # RNNoiseのネイティブフレームサイズ(48kHz, 10ms)
 SAMPLE_RATE = 48000
 
+# D-015 Reviewer差し戻し(1巡目)対応: rnnoise_process_frameの入出力実測遅延。
+# tests/test_rnnoise_wrapper.pyで3つの独立した手法(広帯域チャープ信号の相互相関、
+# インパルス応答的なバースト注入、位相ラップを解決したgroup delay測定)により
+# 2フレーム(960サンプル, 20ms)であることを確認した(旧測定の「0サンプル」は
+# RNNoiseState.process()のin-place破壊によるテスト側のバグだった)。
+OUTPUT_DELAY_FRAMES = 2
+OUTPUT_DELAY_SAMPLES = OUTPUT_DELAY_FRAMES * FRAME_SIZE
+
 # int16スケール(おおよそ-32768..32767)に変換して渡すのがRNNoiseのC APIの規約。
 # -1.0..1.0の正規化float32との相互変換はこのスケールを介して行う。
 PCM16_SCALE = 32768.0
@@ -86,6 +94,19 @@ class RNNoiseState:
 
     def process(self, frame_pcm16_scale: np.ndarray) -> tuple[np.ndarray, float]:
         """int16スケールのfloat32配列(shape=(480,))を処理する。
+
+        破壊的処理(in-place)である点に注意: `rnnoise_process_frame`へ同一ポインタを
+        in/out双方として渡すため、引数がC言語連続配列(`np.ascontiguousarray`が
+        コピーを作らない場合、すなわち既にfloat32でメモリ連続な配列やそのビュー)
+        であれば、**呼び出し元が保持している配列自体もdenoise後の値で上書きされる**。
+        呼び出し元の元データを保持したい場合は、渡す前に`frame_pcm16_scale.copy()`
+        すること(D-015 Reviewer差し戻し: この仕様を知らずに配列スライスをそのまま
+        渡した結果、遅延測定テストの「元の入力」が実質的に出力と同一信号になり
+        誤った測定結果を招いたことがある)。`chain.py`は`float32_to_pcm16_scale`が
+        乗算により毎回新規配列を確保するため、この問題の影響を受けない。
+
+        戻り値の`denoised`は入力に対しOUTPUT_DELAY_FRAMES(2フレーム, 20ms)分
+        遅れて出力される(実測: tests/test_rnnoise_wrapper.py参照)。
 
         Args:
             frame_pcm16_scale: -32768..32767程度の範囲のfloat32配列。

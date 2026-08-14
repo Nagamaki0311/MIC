@@ -4,6 +4,24 @@
 
 ---
 
+## 2026-08-14 T-008 Reviewer差し戻し(1巡目)対応実装
+
+### 実施内容
+- **Critical対応**: `test_rnnoise_wrapper.py`の遅延測定テストで`state.process()`へ渡す全フレームを`.copy()`し、in-placeエイリアシングのバグを修正。`rnnoise.py`の`RNNoiseState.process()`docstringに破壊的処理である旨を明記した。
+- 修正後の3つの独立した手法(探索窓を広げた広帯域チャープの相互相関、インパルス応答的なバースト注入、位相ラップを解決したgroup delay測定)で真の遅延量を再測定し、いずれも**2フレーム(960サンプル、20ms)**で一致することを確認(Reviewerの実測と一致)。
+- `chain.py`に`DRY_DELAY_FRAMES=rnnoise_mod.OUTPUT_DELAY_FRAMES`(2)分のdry(highpassed)信号遅延バッファを追加し、denoised出力と時間整列させてからblendするよう変更。`TransientDetector`も整列後のdry信号に対して計算するよう変更。
+- 副次的に発覚した問題: dry/wet整列により`pedalboard.Limiter`単体のアタックが瞬間的なフルスケール立ち上がりに間に合わずceilingを超えるオーバーシュートが露呈(整列前は偶然のタイミングで隠れていただけと判明)。Limiter出力への最終的な`np.clip`によるハードクリップを安全網として追加した。
+- **Medium対応**: `agc.py`の`AutomaticGainControl.set_params()`で既存の`self._gain`を新しい`min_gain_linear`/`max_gain_linear`へクランプし直すよう修正。
+- 回帰テストを追加: `test_rnnoise_wrapper.py`にバースト注入による遅延測定テストを新規追加し、期待遅延との一致を検証する形へ既存2テストを書き換えた。`test_chain.py`に`TestDryWetTimeAlignment`(コムフィルタ解消の回帰テスト、`make_voice_like_signal`+mix固定0.5+EQ/Compressor/AGC/Gate実質無効化)を追加。`test_agc.py`にAGCクランプの回帰テストを追加。いずれも手元で修正前コードに対して実行すると失敗することを確認した。
+- 副作用: dry/wet整列バッファ追加による起動直後の追加無音区間により、`test_app_gui.py`の1テストが偶発的にfalse-failするようになったため、`_process_settled`ヘルパー(両方のバッファを通過させてから比較)へ変更した。
+- `docs/decisions.md`のD-015に実装内容・再測定結果・確認結果を追記した。
+
+### 結果
+- `pytest tests/`(soak_chain.py除く)144 passed(既存141件+新規3件)、3回連続実行でフレーキーな失敗なし。`pyflakes soloclarity tests`警告0件。`python -m tests.bench_chain`: 1フレームあたり平均1.22ms(予算10msの12.2%、閾値30%未満)。
+
+### 次回開始位置
+- Reviewerによる2巡目の検証を依頼する。承認後、Managerが`docs/tasks.md`のT-008を完了とし、バージョン1.3.0として確定・ビルドする。
+
 ## 2026-08-13 T-008 Reviewer差し戻し(Critical1件・Medium1件)
 
 ### 実施内容

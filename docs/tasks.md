@@ -22,7 +22,7 @@
 | T-005 | プリセット・詳細設定UIの再調整（「小さくて低い声＋高品質ノイズ除去」） | 高 | 完了 | claude | discord_call→quiet_low_voiceへ置き換え、ノイズ除去3段階再調整（除去量維持・ゲート緩和）、詳細設定15項目の日本語ラベル・説明・目安表示、9条件の合成信号テストをReviewerが独自検証しCONFIRMED。Reviewer最終所見「このまま次のビルドへ進めて問題ない」。詳細はdocs/decisions.md D-010・D-011参照 |
 | T-006 | ノイズ処理のバックグラウンド/インパクト2系統分離・最終総点検 | 高 | 完了 | claude | TransientDetector新設、NoiseStage2分割、詳細設定スライダーのライブ反映確認・縦スクロール対応も実施。ReviewerがMedium指摘1件(無音からの立ち上がり時、トランジェント検出器が約120ms背景抑制を弱める既知の限界、声自体は欠落せず自己制限的)を発見したがリリースをブロックしないと判断、その他はすべてCONFIRMED。Reviewer最終所見「このまま次のビルドへ進めて問題ない」。pytest 118 passed。詳細はdocs/decisions.md D-012・D-013参照 |
 | T-007 | 実機報告: 詳細設定パネルのスライダーが横方向に見切れる問題の修正・ウィンドウのリサイズ可能化 | 高 | 完了 | claude | 原因(Canvasのwidth未指定)を特定・修正、resizable化・minsize設定も実施。Reviewer1巡目でHigh×1・Medium×1・Low×2を指摘、Manager対応中に新規回帰(D-013の遅延発火がガードなしで露出)を自ら発見し修正。Reviewer2巡目で全指摘の解消・新規回帰なしをCONFIRMED、「このままマージしてよい」。pytest 123 passed(3回連続)、pyflakes警告0件。version 1.2.1として確定。詳細はdocs/decisions.md D-014参照 |
-| T-008 | 実機報告: 音声処理パイプライン・デフォルトプリセットの実運用品質不足(声の途切れ・遠い/小さい・過剰ノイズ抑制)の再検証・再設計 | 高 | 実装中 | claude | ReviewerがCritical1件(RNNoise遅延測定がin-placeエイリアシングのバグで常に0サンプルを返しており、実際は約2フレーム=20msの遅延がある。D-015 Step0-1「遅延なし」の結論が誤りで、dry/wet整列(Step1)が未実施のまま残っている)・Medium1件(プリセット切替直後、非発話中はAGCゲインが新しいmax_gain_dbでクランプされずフリーズする)を指摘、差し戻し。Developerへ再修正を委任。詳細はdocs/decisions.md D-015参照 |
+| T-008 | 実機報告: 音声処理パイプライン・デフォルトプリセットの実運用品質不足(声の途切れ・遠い/小さい・過剰ノイズ抑制)の再検証・再設計 | 高 | レビュー中 | claude | Reviewer差し戻し(1巡目、Critical1件・Medium1件)への対応実装完了。真の遅延量(2フレーム=960サンプル=20ms)を3手法で再測定し確定、`chain.py`にdry/wet整列バッファを実装(副次的にLimiterオーバーシュートも発見・ハードクリップで対応)、AGCゲインクランプも修正。pytest 144 passed(3回連続)、pyflakes警告0件、bench 12.2%。Reviewer2巡目の再検証待ち。詳細はdocs/decisions.md D-015参照 |
 
 ## バックログ（未着手・優先度未確定）
 

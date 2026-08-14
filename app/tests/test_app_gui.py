@@ -335,6 +335,21 @@ class TestAdvancedSliderChangesReflectLiveInAudioEngine:
         engine._output_callback(outdata, FRAME_SIZE, None, None)
         return outdata[:, 0].copy()
 
+    @classmethod
+    def _process_settled(cls, engine: AudioEngine, frame: np.ndarray, n: int = 8) -> np.ndarray:
+        """同じフレーム内容をn回繰り返し流し、最後の出力を返す。
+
+        D-015: `VoiceChain`にdry/wetパスの時間整列バッファ(2フレーム)が追加され、
+        `AudioEngine`のjitterバッファpriming(D-015、PRIME_TARGET_FRAMES=2)と合わせて
+        起動直後は出力が無音のままになる区間が伸びた。1回きりの`_process_once`では
+        両方のバッファがまだ埋まりきっておらず、スライダー変更前後どちらの呼び出しも
+        無音のまま比較してしまう恐れがあるため、十分な回数流してから比較する。
+        """
+        out = cls._process_once(engine, frame)
+        for _ in range(n - 1):
+            out = cls._process_once(engine, frame)
+        return out
+
     def test_engine_holds_the_same_chain_instance_as_the_app(self, app_factory):
         app = app_factory()
         engine = AudioEngine(app.chain)
@@ -368,13 +383,13 @@ class TestAdvancedSliderChangesReflectLiveInAudioEngine:
 
         rng = np.random.default_rng(1)
         frame = rng.normal(0.0, 0.05, FRAME_SIZE).astype(np.float32)
-        out_before = self._process_once(engine, frame)
+        out_before = self._process_settled(engine, frame)
 
         # background_wet_dry_mixを大きく変える(RNNoiseの適用量が変わり、
         # 同一フレームに対する出力が変わるはず)。
         app._advanced_sliders["noise_background_mix"].set(0.0)
         app.update()
-        out_after = self._process_once(engine, frame)
+        out_after = self._process_settled(engine, frame)
 
         assert not np.allclose(out_before, out_after)
 
