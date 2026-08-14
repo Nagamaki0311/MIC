@@ -522,6 +522,56 @@ class TestDryWetTimeAlignment:
         )
 
 
+class TestSpeechProbTimeAlignment:
+    """D-015 Reviewer差し戻し(2巡目): RNNoiseが返すspeech_probはdenoised(出力オーディオ)と
+    異なり遅延が無い(フレームnの入力に対するリアルタイムの推定値)。整列せずそのまま
+    SpeechActivityTrackerへ渡すと、ゲート・AGCは「今処理中のオーディオ」(aligned_dry/
+    denoised由来でDRY_DELAY_FRAMES遅れている)より未来の発話確率で開閉・凍結判定を
+    してしまう。speech_probをaligned_dryと同じDRY_DELAY_FRAMES分遅延させることで、
+    speech_activeがTrueへ切り替わるフレームと、出力オーディオが実際に立ち上がる
+    フレームが一致することを確認する。
+
+    修正前(speech_probを整列せず`self._speech_tracker.update(speech_prob)`へ生値の
+    まま渡すコード)へ戻すと、speech_activeがDRY_DELAY_FRAMES(2フレーム)早く
+    切り替わり、本テストは失敗する(手元で確認済み)。
+    """
+
+    def test_speech_active_transition_aligns_with_output_audio_rise(self, chain_factory):
+        silence_frames = 60
+        burst_frames = 40
+        silence = np.zeros(silence_frames * FRAME_SIZE, dtype=np.float32)
+        burst = make_voice_like_signal(burst_frames * FRAME_SIZE, f0=110.0, amplitude=10 ** (-20.0 / 20.0), seed=11)
+        signal = np.concatenate([silence, burst])
+
+        chain = chain_factory("quiet_low_voice")
+        speech_active_series: list[bool] = []
+        rms_series: list[float] = []
+        for i in range(0, len(signal), FRAME_SIZE):
+            frame = signal[i : i + FRAME_SIZE]
+            out, _ = chain.process(frame)
+            speech_active_series.append(chain._speech_tracker._active)
+            rms_series.append(float(np.sqrt(np.mean(out.astype(np.float64) ** 2))))
+
+        # RNNoiseのSTFT解析窓のオーバーラップにより、burst開始の1フレーム前後で
+        # ごく微小な(steady-stateの1%未満の)漏れ込みが観測されるため、単純な
+        # 「ゼロでなくなる最初のフレーム」ではなく、定常区間RMSの半分を超える最初の
+        # フレームで「オーディオが実際に立ち上がった」タイミングを判定する
+        # (Reviewerの実測手法「RMSがベースラインの半分を超える」に合わせた)。
+        steady_state_rms = float(np.median(rms_series[80:100]))
+        rms_half_threshold = steady_state_rms * 0.5
+        t_active = next(i for i, active in enumerate(speech_active_series) if active)
+        t_audio_rise = next(i for i, rms in enumerate(rms_series) if rms > rms_half_threshold)
+
+        assert t_active == t_audio_rise, (
+            f"speech_active first became True at frame {t_active}, but the output audio's RMS "
+            f"first crossed half of the steady-state level ({rms_half_threshold:.6f}) at frame "
+            f"{t_audio_rise} (expected these to match: gate/AGC decisions must reference the same "
+            "audio timeline that speech_prob was measured on, not a frame that is DRY_DELAY_FRAMES "
+            "in the future relative to the audio currently being emitted; see chain.py "
+            "aligned_speech_prob, docs/decisions.md D-015)."
+        )
+
+
 class TestQuietLowVoicePresetRealWorldScenarios:
     """quiet_low_voiceプリセット(D-015再設計後)を、ユーザーが指定した16の想定
     利用シーンそれぞれについて合成信号で検証する(docs/decisions.md D-015参照)。

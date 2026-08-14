@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-08-14 T-008 Reviewer差し戻し(2巡目)対応実装
+
+### 実施内容
+- Reviewerが1巡目対応(commit 2465039)を独立再現実験で確認した上で発見した新規Medium指摘に対応: dry/wet整列で`denoised`/`aligned_dry`(オーディオパス全体)は`DRY_DELAY_FRAMES`(2フレーム)遅延させたが、RNNoiseが返す`speech_prob`(遅延無し、フレームnのリアルタイム推定値)は整列せずそのまま`SpeechActivityTracker`へ渡していたため、ゲート・AGCが「今処理中のオーディオ」より約20ms未来の発話確率で開閉・凍結判定していた。
+- `chain.py`の`VoiceChain.__init__`に`self._speech_prob_delay_buffer: deque[float]`(`maxlen=DRY_DELAY_FRAMES`、`0.0`で初期化)を追加し、`process()`内で`aligned_dry`と同じ位置で`aligned_speech_prob`を取り出し、`self._speech_tracker.update(aligned_speech_prob)`へ変更した。`process()`の戻り値`speech_prob`は既存のdocstring文言との一貫性を優先し、整列前の生値のまま返すこととした。
+- 回帰テストを追加: `test_chain.py`に`TestSpeechProbTimeAlignment`(無音→声様バーストの立ち上がりで、`speech_active`が`True`になるフレームと出力オーディオRMSが定常状態の半分を超えるフレームが一致することを確認)。手元で整列前の修正前コードに戻して実行すると、2フレーム(`DRY_DELAY_FRAMES`)分ズレて実際に失敗することを確認した。
+- `docs/decisions.md`のD-015に実装内容・確認結果を追記した。
+
+### 結果
+- `pytest tests/`(soak_chain.py除く)145 passed(既存144件+新規1件)、3回連続実行でフレーキーな失敗なし。既存の`TestQuietLowVoicePresetRealWorldScenarios`(16シナリオ)・`test_gate.py`・`test_agc.py`もすべて引き続きpass。`pyflakes soloclarity tests`警告0件。`python -m tests.bench_chain`: 1フレームあたり平均1.26ms(予算10msの12.6%、閾値30%未満)。
+
+### 次回開始位置
+- Reviewerによる2巡目修正の検証を依頼する。承認後、Managerが`docs/tasks.md`のT-008を完了とし、バージョン1.3.0として確定・ビルドする(コミットもManagerが最終確認後に行う)。
+
 ## 2026-08-14 T-008 Reviewer差し戻し(1巡目)対応実装
 
 ### 実施内容

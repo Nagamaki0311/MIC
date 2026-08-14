@@ -786,3 +786,13 @@ Reviewerが1巡目の指摘(Critical・Medium)の解消を独立した再現実�
 **影響**: `SpeechActivityTracker`のヒステリシス/hangover(200ms)判定、AGCの凍結判定のタイミングが本来より20ms早い。200msのhangoverマージンで大部分は吸収される可能性が高くCriticalではないが、T-008全体の主題(発話終端でのゲート早期クローズによる「プツプツ途切れる」症状)に直結するため、未検証のまま残すべきではないとReviewerは判断した。
 
 **対応方針**: `speech_prob`(またはそれに基づく発話状態)も`aligned_dry`と同じ`OUTPUT_DELAY_FRAMES`分の遅延バッファを通し、ゲート/AGCへ渡す前に時間整列する。Developerへ再修正を委任する。
+
+### 実装追記(Developer, 2026-08-14): Reviewer差し戻し(2巡目)対応の実装内容
+
+**1. speech_probの整列バッファを追加**: `chain.py`の`VoiceChain.__init__`に`self._speech_prob_delay_buffer: deque[float]`(`maxlen=DRY_DELAY_FRAMES`、無音相当の`0.0`で初期化)を追加した。`process()`内で、`aligned_dry`と同じ位置(dry遅延バッファの読み書き直後)で`aligned_speech_prob = self._speech_prob_delay_buffer.popleft(); self._speech_prob_delay_buffer.append(speech_prob)`を行い、`self._speech_tracker.update(speech_prob)`を`self._speech_tracker.update(aligned_speech_prob)`に変更した。これにより、ゲート・AGCが参照する発話状態は、実際にゲイン制御を適用する対象(`aligned_dry`/`denoised`由来、n-DRY_DELAY_FRAMES時点のオーディオ)と同じ時刻のRNNoise発話確率に基づくようになった。`process()`の戻り値`speech_prob`(呼び出し元は`engine.py`では破棄しているのみ)は、ドキュメント文言(「RNNoiseが返した発話確率」)との一貫性を優先し、整列前の生値のまま返すこととした(整列後の値を返すのは「このprocess()呼び出しに対応する発話確率」という意味と食い違うため)。
+
+**2. 回帰テストの追加**: `test_chain.py`に`TestSpeechProbTimeAlignment`を追加した。無音60フレーム→`make_voice_like_signal`による声様バースト40フレームの立ち上がりを合成し、(a) `chain._speech_tracker._active`が最初に`True`になるフレーム番号と、(b) 出力オーディオのRMSが定常区間RMSの半分を初めて超えるフレーム番号、が一致することを確認する。RNNoiseのSTFT解析窓オーバーラップにより、バースト開始の前後1フレームでごく微小な(定常状態の1%未満の)漏れ込みRMSが観測されるため、「ゼロでなくなる最初のフレーム」ではなく「定常RMSの半分を超える最初のフレーム」で判定した(Reviewerの実測手法「RMSがベースラインの半分を超える」に合わせた)。手元で`self._speech_tracker.update(speech_prob)`(整列なしの修正前コード)に戻して実行すると、`speech_active`がフレーム60、オーディオ立ち上がりがフレーム62で一致せず、実際に失敗することを確認した(2フレーム=`DRY_DELAY_FRAMES`分のズレが実測どおり再現)。修正後はいずれもフレーム62で一致しpassする。
+
+**3. テスト結果**: `pytest tests/`(soak_chain.py除く)145 passed(既存144件+新規1件)、3回連続実行でフレーキーな失敗なし。既存の`TestQuietLowVoicePresetRealWorldScenarios`(16シナリオ)・`test_gate.py`・`test_agc.py`もすべて引き続きpass(speech_active参照タイミングの変更による既存テストの前提崩れは無し)。`pyflakes soloclarity tests`警告0件。`python -m tests.bench_chain`は1フレームあたり平均1.26ms(予算10msの12.6%、閾値30%未満を維持)。
+
+**未解決の懸念**: なし。Reviewerの再検証を推奨する。

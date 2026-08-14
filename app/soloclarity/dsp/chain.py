@@ -25,6 +25,16 @@ blendに使う整列後のdry信号に対して計算する(混合比の算出�
 
 発話状態(発話中か)の判定はSpeechActivityTracker(gate.py)へ一元化し、
 AGC・ゲートの両方がこれを共有する。
+
+D-015 Reviewer差し戻し(2巡目)対応: RNNoiseの`process()`が返す`speech_prob`は
+denoisedオーディオと異なり遅延が無い(フレームnの入力に対するリアルタイムの推定値)。
+一方AGC・ゲートが実際にゲイン制御を適用する対象はaligned_dry/denoised由来の
+2フレーム前(n-DRY_DELAY_FRAMES)のオーディオである。整列前のspeech_probをそのまま
+SpeechActivityTrackerへ渡すと、ゲート・AGCが「今処理中のオーディオ」より
+DRY_DELAY_FRAMES分「未来」の発話確率で開閉・凍結判定をしてしまう
+(ヒステリシス/hangoverのタイミングが本来より早くずれる)。これを避けるため、
+speech_probもdry信号と同じ`DRY_DELAY_FRAMES`分の遅延バッファを通し、
+SpeechActivityTrackerへ渡す前にオーディオパスと時間整列する。
 """
 
 from __future__ import annotations
@@ -111,6 +121,13 @@ class VoiceChain:
         # buffer primingと同種のトレードオフ)。
         self._dry_delay_buffer: deque[np.ndarray] = deque(
             (np.zeros(FRAME_SIZE, dtype=np.float32) for _ in range(DRY_DELAY_FRAMES)),
+            maxlen=DRY_DELAY_FRAMES,
+        )
+        # D-015 Reviewer差し戻し(2巡目)対応: speech_probをaligned_dryと同じ遅延量で
+        # 整列し、AGC・ゲートが参照する発話状態が「今処理中のオーディオ」に対応する
+        # ようにする(無音相当の0.0で初期化)。
+        self._speech_prob_delay_buffer: deque[float] = deque(
+            (0.0 for _ in range(DRY_DELAY_FRAMES)),
             maxlen=DRY_DELAY_FRAMES,
         )
 
@@ -212,6 +229,14 @@ class VoiceChain:
         aligned_dry = self._dry_delay_buffer.popleft()
         self._dry_delay_buffer.append(highpassed)
 
+        # D-015 Reviewer差し戻し(2巡目)対応: speech_prob(遅延無し、フレームnの
+        # リアルタイム推定値)をaligned_dryと同じDRY_DELAY_FRAMES分遅延させ、
+        # SpeechActivityTrackerへ渡す発話状態がaligned_dry由来のオーディオ(n-2)と
+        # 同じ時刻を指すようにする。戻り値のspeech_probは呼び出し元の一貫性のため
+        # RNNoiseの生値のまま返す(ドキュメント通り「RNNoiseが返した発話確率」)。
+        aligned_speech_prob = self._speech_prob_delay_buffer.popleft()
+        self._speech_prob_delay_buffer.append(speech_prob)
+
         transient_score = self._transient_detector.process(aligned_dry)
 
         mix = self._noise_stage.background_wet_dry_mix * (1.0 - transient_score) + (
@@ -221,7 +246,7 @@ class VoiceChain:
 
         eq_out = self._eq_board.process(blended, SAMPLE_RATE, reset=False)
         comp_out = self._compressor_board.process(eq_out, SAMPLE_RATE, reset=False)
-        speech_active = self._speech_tracker.update(speech_prob)
+        speech_active = self._speech_tracker.update(aligned_speech_prob)
         agc_out = self.agc.process(comp_out, speech_active)
         limited = self._limiter_board.process(agc_out, SAMPLE_RATE, reset=False)
         limited = np.clip(limited, -LIMITER_CEILING_LINEAR, LIMITER_CEILING_LINEAR)
