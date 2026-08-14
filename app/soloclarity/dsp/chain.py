@@ -5,6 +5,13 @@
 入力 -> HighpassFilter -> TransientDetector(混合比算出用) -> RNNoise denoise
      (発話確率取得、wet/dry blend) -> EQ(PeakFilter束、明瞭度で強度可変)
      -> Compressor -> 自前AGC -> Limiter -> 発話確率ゲート -> 出力
+
+D-015: RNNoiseの入出力遅延はrnnoise_process_frameへの実測(チャープ信号の相互相関、
+複数周波数での位相ベースgroup delay測定、tests/test_rnnoise_wrapper.py参照)で
+0サンプルと確認されたため、dry/wetパスの時間整列(1フレーム遅延バッファ)は
+実施していない(Step0-1で「遅延なし」を確認した場合はスキップする、という
+承認済み方針どおり)。発話状態(発話中か)の判定はSpeechActivityTracker
+(gate.py)へ一元化し、AGC・ゲートの両方がこれを共有する。
 """
 
 from __future__ import annotations
@@ -17,7 +24,7 @@ import pedalboard
 from soloclarity import presets
 from soloclarity.dsp import rnnoise as rnnoise_mod
 from soloclarity.dsp.agc import AutomaticGainControl
-from soloclarity.dsp.gate import SpeechProbabilityGate
+from soloclarity.dsp.gate import SpeechActivityTracker, SpeechProbabilityGate
 from soloclarity.dsp.transient import TransientDetector
 
 FRAME_SIZE = rnnoise_mod.FRAME_SIZE
@@ -76,8 +83,10 @@ class VoiceChain:
         self._compressor_board: pedalboard.Pedalboard
         self._limiter_board = _build_limiter_board()
         self._noise_stage: presets.NoiseStage
-        self.gate: SpeechProbabilityGate
-        self.agc: AutomaticGainControl
+        self.gate: Optional[SpeechProbabilityGate] = None
+        self.agc: Optional[AutomaticGainControl] = None
+        self.agc_params: Optional[presets.AgcParams] = None
+        self._speech_tracker: Optional[SpeechActivityTracker] = None
 
         self.clarity_level = presets.PRESETS[preset_name].clarity
         self.noise_level = presets.PRESETS[preset_name].noise
@@ -106,22 +115,45 @@ class VoiceChain:
         self.set_noise_stage(presets.NOISE_STAGES[level])
 
     def set_noise_stage(self, stage: presets.NoiseStage) -> None:
-        """詳細設定パネルからの生値上書き用。"""
+        """詳細設定パネルからの生値上書き用。
+
+        D-015: 呼び出しのたびにSpeechProbabilityGate/SpeechActivityTrackerを
+        作り直すと、内部状態(ゲイン・hangoverカウンタ)がリセットされ、詳細設定
+        スライダーを触るたびに声が一瞬消える副作用があった。既存インスタンスが
+        あれば`set_params`で係数だけ更新し、状態は保持する。
+        """
         self._noise_stage = stage
-        self.gate = SpeechProbabilityGate(
-            threshold=stage.gate_threshold, release_ms=stage.gate_release_ms
-        )
+        if self.gate is None:
+            self.gate = SpeechProbabilityGate(threshold=stage.gate_threshold, release_ms=stage.gate_release_ms)
+        else:
+            self.gate.set_params(threshold=stage.gate_threshold, release_ms=stage.gate_release_ms)
+        if self._speech_tracker is None:
+            self._speech_tracker = SpeechActivityTracker(open_threshold=stage.gate_threshold)
+        else:
+            self._speech_tracker.set_params(open_threshold=stage.gate_threshold)
 
     def set_compressor(self, compressor: presets.CompressorParams) -> None:
         self._compressor_board = _build_compressor_board(compressor)
 
     def set_agc(self, agc: presets.AgcParams) -> None:
-        self.agc = AutomaticGainControl(
-            target_dbfs=agc.target_dbfs,
-            max_gain_db=agc.max_gain_db,
-            attack_seconds=agc.attack_seconds,
-            release_seconds=agc.release_seconds,
-        )
+        """D-015: 既存のAutomaticGainControlインスタンスがあれば`set_params`で
+        係数だけ更新し、ゲイン・RMSエンベロープ等の内部状態は保持する
+        (set_noise_stageと同じ理由)。"""
+        self.agc_params = agc
+        if self.agc is None:
+            self.agc = AutomaticGainControl(
+                target_dbfs=agc.target_dbfs,
+                max_gain_db=agc.max_gain_db,
+                attack_seconds=agc.attack_seconds,
+                release_seconds=agc.release_seconds,
+            )
+        else:
+            self.agc.set_params(
+                target_dbfs=agc.target_dbfs,
+                max_gain_db=agc.max_gain_db,
+                attack_seconds=agc.attack_seconds,
+                release_seconds=agc.release_seconds,
+            )
 
     def process(self, frame: np.ndarray) -> tuple[np.ndarray, float]:
         """480サンプルのfloat32 mono(-1.0..1.0)を処理する。
@@ -146,9 +178,10 @@ class VoiceChain:
 
         eq_out = self._eq_board.process(blended, SAMPLE_RATE, reset=False)
         comp_out = self._compressor_board.process(eq_out, SAMPLE_RATE, reset=False)
-        agc_out = self.agc.process(comp_out, speech_prob)
+        speech_active = self._speech_tracker.update(speech_prob)
+        agc_out = self.agc.process(comp_out, speech_active)
         limited = self._limiter_board.process(agc_out, SAMPLE_RATE, reset=False)
-        gated = self.gate.apply(limited, speech_prob)
+        gated = self.gate.apply(limited, speech_active)
 
         return gated.astype(np.float32), speech_prob
 

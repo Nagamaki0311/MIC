@@ -4,6 +4,30 @@
 
 ---
 
+## 2026-08-14 T-008実装完了、Reviewer検証待ち
+
+### 実施内容
+- Step0(着手前の実測、使い捨てスクリプト): RNNoiseの入出力遅延を2手法(チャープ信号の広帯域相互相関・複数周波数での位相ベースgroup delay測定)で実測し、いずれも**0サンプル**(D-015の仮説だった1フレーム遅延は再現せず)と判明。既存`make_low_voice_signal`の発話確率が平均0.023にとどまることを確認し、ビブラート・トレモロ・微小ブレスノイズを加えた`make_voice_like_signal`を新設(f0=110Hz/210Hzで発話確率0.9以上を実測)。ゲートのチャタリング(ノイズ混入時にgate._gainが0.0=完全ミュートまで頻繁に落ちる)、AGC収束時間(旧2.0s/4.0sで6.8〜8.6秒、新0.4s/1.5sで2.6〜3.2秒)、background_wet_dry_mix(ノイズ単独減衰: mix0.85で16.5dB)、明瞭度strongのEQ低域損失(hp90/-4.0/-2.5で-4.1dB→hp80/-2.0/-1.5で-2.7dB)を実測。詳細な数値はdocs/decisions.md D-015追記参照。
+- Step1(dry/wetパスの時間整列)は、Step0-1で遅延0サンプルと確認されたため**実施しなかった**(承認済み方針どおりD-015へ追記)。将来のRNNoise更新での検知用に`tests/test_rnnoise_wrapper.py`へ2種類の遅延回帰テストを追加した。
+- Step2: `gate.py`に`SpeechActivityTracker`(ヒステリシス+hangover200ms)を新設し、`SpeechProbabilityGate`を完全ミュート(0.0)からフロア(`GATE_FLOOR_DB=-18.0dB`)へのダッキングへ変更、ゲインもフレーム内線形ランプ(`np.linspace`)に変更した。シグネチャを`apply(frame, speech_active: bool)`へ変更。
+- Step3: `agc.py`の`freeze_speech_prob_threshold`を削除し`process(frame, speech_active: bool)`へ変更、ゲイン適用をフレーム内線形ランプ化、`presets.AgcParams`の既定attack/releaseを2.0/4.0→0.4/1.5へ変更。
+- Step4: `chain.py`に`SpeechActivityTracker`を配線し、AGC・ゲート両方へ`speech_active`を共有。`set_noise_stage`/`set_agc`を`set_params`方式に変更し、詳細設定スライダー操作のたびに内部状態(ゲイン・エンベロープ・hangoverカウンタ)がリセットされていた副次バグを修正。
+- Step5: `presets.py`の`NOISE_STAGES["strong"].background_wet_dry_mix`を1.00→0.85(standard: 0.80→0.75)、`CLARITY_STAGES["strong"]`をhp90→80Hz・200Hz-4.0→-2.0dB・300Hz-2.5→-1.5dB(standardも連動して緩和)、`quiet_low_voice`のCompressorをthreshold-23.0→-20.0dB・ratio2.8→2.2・attack10→15msへ変更。
+- Step6: `gui/app.py`の`_apply_slider_values_to_chain`を`presets.AgcParams(...)`直接構築から`dataclasses.replace(self.chain.agc_params, ...)`へ変更し、スライダー操作でattack/releaseがプリセット既定値から外れるバグを修正。`VoiceChain`に`agc_params`属性を新規公開。
+- Step7(ジッタバッファのpriming): 他Stepのテストが安定した後に追加。`PRIME_TARGET_FRAMES=2`と`_primed`フラグを`engine.py`に追加し、バッファが2フレーム溜まるまで出力側は無音を維持、アンダーラン時は`_primed=False`へ戻し再充填する設計にした。既存`test_engine.py`の「1フレームpushで即pop出力」前提のテストは`engine._primed=True`を直接設定して前提を保ち、priming自体の振る舞いは新設`TestPriming`クラスで別途検証した。
+- Step8: `test_chain.py`に`make_voice_like_signal`・`frame_rms_series`・`assert_no_dropouts`・`assert_no_frame_boundary_clicks`を追加し、`TestQuietLowVoicePresetRealWorldScenarios`をユーザー指定の16シナリオへ再構成した。`test_gate.py`/`test_agc.py`をシグネチャ変更・新時定数・`SpeechActivityTracker`単体テストへ更新。`test_engine.py`にpriming関連のテストを追加。`test_rnnoise_wrapper.py`へ遅延回帰テストを追加(既存のRNNoiseラッパーテストは保持したまま追記、当初Writeで誤って全置換しかけたのを気づいて復元した)。
+
+### 結果
+- `pytest tests/`(soak_chain.py除く)141 passed(既存123件相当+新規18件)、3回連続実行でフレーキーな失敗なし。`pyflakes soloclarity tests`警告0件。
+- `python -m tests.bench_chain`: 1フレームあたり平均1.35ms(予算10msの13.5%、閾値30%未満)。`tests/soak_chain.py`: 10万フレーム処理でRSS成長比1.007倍・処理時間劣化比1.174倍、いずれも合格。
+- pre-fixコード(git HEAD時点のgate.py/agc.py/chain.py/presets.py)に対して新しい16シナリオテストを実行し、32件中3件(シナリオ6「もしもし反復」・7「小さい声の朗読」・12「発声→無音」)が実際に失敗(フレーム境界クリック検出)、修正後は全てpassすることを確認した。残り29件は主に合成音声モデルが安定して発話確率0.9以上を示すため旧実装でも偶然パスしており、回帰検出力は限定的(詳細・懸念はD-015追記参照)。
+- `docs/tasks.md`のT-008を「実装中」→「レビュー中」に更新(完了はReviewer検証後にManagerが行う)。`docs/decisions.md`のD-015へ実測結果・最終確定パラメータ・未解決の懸念を追記した。
+- `app/soloclarity/__init__.py`の`__version__`は未変更(1.3.0への変更はReviewer承認後)。`app/WINDOWS_VERIFICATION_CHECKLIST.md`に今回変更分の確認項目(遅延増加の体感・ゲートフロア化での残留ノイズ・16シナリオの主観評価)を追加した。
+
+### 次回開始位置
+- Reviewerによる敵対的検証。特に確認してほしい点: (1) Step0-5(background_wet_dry_mix)の実測が合成音声モデルの限界で弁別力を持たず計画時の推奨初期値0.85をそのまま採用した判断の妥当性、(2) 16シナリオのうち回帰検出力を確認できたのは3件にとどまる点、(3) ゲートのフロア化・primingが持つ意図的なトレードオフ(残留ノイズ・追加遅延)の許容可否。
+- Reviewer承認後、Managerが`docs/tasks.md`のT-008を完了へ更新し、`__version__`を1.3.0へ変更してビルドする。
+
 ## 2026-08-13 T-008計画確定、Developerへ委任
 
 ### 実施内容

@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 
 from soloclarity.audio import engine as engine_mod
-from soloclarity.audio.engine import JITTER_BUFFER_FRAMES, AudioEngine
+from soloclarity.audio.engine import JITTER_BUFFER_FRAMES, PRIME_TARGET_FRAMES, AudioEngine
 from soloclarity.dsp.chain import FRAME_SIZE
 
 
@@ -36,6 +36,17 @@ def _out_frame() -> np.ndarray:
     return np.zeros((FRAME_SIZE, 1), dtype=np.float32)
 
 
+def _make_primed_engine(*args, **kwargs) -> AudioEngine:
+    """D-015: priming(起動直後にPRIME_TARGET_FRAMESフレーム溜まるまで出力しない)は
+    ジッタバッファ自体の検証(TestJitterBuffer/TestPriming)以外のテストの関心事
+    ではない。それらのテストでは「1フレームpushで即pop出力される」という
+    priming導入前の前提を保ったまま検証したいため、priming済み状態から始める。
+    """
+    engine = AudioEngine(*args, **kwargs)
+    engine._primed = True
+    return engine
+
+
 def _push_and_pop_once(engine: AudioEngine, value: float) -> np.ndarray:
     engine._input_callback(_in_frame(value), FRAME_SIZE, None, None)
     outdata = _out_frame()
@@ -48,7 +59,7 @@ def _push_and_pop_once(engine: AudioEngine, value: float) -> np.ndarray:
 
 def test_input_callback_falls_back_to_bypass_and_reports_error_when_chain_raises():
     errors = []
-    engine = AudioEngine(_FailingChain(), on_error=errors.append)
+    engine = _make_primed_engine(_FailingChain(), on_error=errors.append)
     indata = _in_frame(0.3)
 
     engine._input_callback(indata, FRAME_SIZE, None, None)
@@ -71,7 +82,7 @@ def test_input_callback_recovers_on_next_frame_after_transient_error():
             return frame * 0.5, 1.0
 
     errors = []
-    engine = AudioEngine(FlakyChain(), on_error=errors.append)
+    engine = _make_primed_engine(FlakyChain(), on_error=errors.append)
     indata = _in_frame(0.4)
 
     engine._input_callback(indata, FRAME_SIZE, None, None)
@@ -88,7 +99,7 @@ def test_input_callback_recovers_on_next_frame_after_transient_error():
 
 
 def test_input_callback_without_on_error_does_not_raise():
-    engine = AudioEngine(_FailingChain())  # on_error未指定
+    engine = _make_primed_engine(_FailingChain())  # on_error未指定
     indata = _in_frame(0.1)
     engine._input_callback(indata, FRAME_SIZE, None, None)  # 例外を送出しないこと
     outdata = _out_frame()
@@ -97,7 +108,7 @@ def test_input_callback_without_on_error_does_not_raise():
 
 
 def test_input_callback_normal_path_still_works():
-    engine = AudioEngine(_PassthroughChain())
+    engine = _make_primed_engine(_PassthroughChain())
     indata = _in_frame(0.2)
     engine._input_callback(indata, FRAME_SIZE, None, None)
     outdata = _out_frame()
@@ -106,7 +117,7 @@ def test_input_callback_normal_path_still_works():
 
 
 def test_input_callback_bypass_mode_ignores_chain_entirely():
-    engine = AudioEngine(_FailingChain())
+    engine = _make_primed_engine(_FailingChain())
     engine.bypass = True
     indata = _in_frame(0.55)
     engine._input_callback(indata, FRAME_SIZE, None, None)
@@ -157,13 +168,70 @@ class TestJitterBuffer:
         np.testing.assert_allclose(outdata[:, 0], np.zeros(FRAME_SIZE, dtype=np.float32))
 
 
+# --- priming: 起動直後・アンダーラン後はPRIME_TARGET_FRAMES溜まるまで出力しない (D-015) --
+
+
+class TestPriming:
+    def test_engine_starts_unprimed(self):
+        engine = AudioEngine(_PassthroughChain())
+        assert engine._primed is False
+
+    def test_output_stays_silent_until_prime_target_is_reached(self):
+        engine = AudioEngine(_PassthroughChain())
+        assert PRIME_TARGET_FRAMES >= 2, "test assumes at least 2 frames are needed to prime"
+
+        # PRIME_TARGET_FRAMES未満しか溜まっていない間は、出力は無音でポップもされない。
+        for i in range(PRIME_TARGET_FRAMES - 1):
+            engine._input_callback(_in_frame(float(i + 1)), FRAME_SIZE, None, None)
+            outdata = _out_frame()
+            engine._output_callback(outdata, FRAME_SIZE, None, None)
+            np.testing.assert_allclose(outdata[:, 0], np.zeros(FRAME_SIZE, dtype=np.float32))
+            assert engine._primed is False
+            assert len(engine._buffer) == i + 1  # ポップされていない
+
+    def test_output_resumes_once_prime_target_is_reached(self):
+        engine = AudioEngine(_PassthroughChain())
+        for i in range(PRIME_TARGET_FRAMES - 1):
+            engine._input_callback(_in_frame(float(i + 1)), FRAME_SIZE, None, None)
+            engine._output_callback(_out_frame(), FRAME_SIZE, None, None)
+
+        # 目標フレーム数に達した後の最初の入力で、priming状態が解除され通常再生に戻る。
+        engine._input_callback(_in_frame(9.0), FRAME_SIZE, None, None)
+        outdata = _out_frame()
+        engine._output_callback(outdata, FRAME_SIZE, None, None)
+        assert engine._primed is True
+        np.testing.assert_allclose(outdata[:, 0], np.full(FRAME_SIZE, 1.0 * 2.0, dtype=np.float32))
+
+    def test_underrun_after_priming_returns_to_priming_state(self):
+        """primed状態でバッファが空になった(アンダーラン)場合、再度priming状態へ戻り、
+        PRIME_TARGET_FRAMES溜まるまでポップを再開しない(D-015)。"""
+        engine = AudioEngine(_PassthroughChain())
+        for i in range(PRIME_TARGET_FRAMES):
+            engine._input_callback(_in_frame(float(i + 1)), FRAME_SIZE, None, None)
+        # 溜めたフレームをすべてポップし切ってバッファを空にする(アンダーラン発生)。
+        for _ in range(PRIME_TARGET_FRAMES):
+            engine._output_callback(_out_frame(), FRAME_SIZE, None, None)
+        assert engine._primed is True  # ポップし切るまではprimed状態が続く
+
+        engine._output_callback(_out_frame(), FRAME_SIZE, None, None)  # ここでアンダーラン
+        assert engine._primed is False
+
+        # 1フレームだけpushしても(PRIME_TARGET_FRAMES未満)、すぐにはポップされない。
+        engine._input_callback(_in_frame(42.0), FRAME_SIZE, None, None)
+        outdata = _out_frame()
+        engine._output_callback(outdata, FRAME_SIZE, None, None)
+        if PRIME_TARGET_FRAMES > 1:
+            np.testing.assert_allclose(outdata[:, 0], np.zeros(FRAME_SIZE, dtype=np.float32))
+            assert engine._primed is False
+
+
 # --- メーター: 出力側は実際に書き出す値(アンダーラン時の無音を含む)を測る -------
 
 
 class TestMeterMeasuresActualOutput:
     def test_output_meter_reflects_underrun_silence_not_stale_input_level(self):
         meter_calls = []
-        engine = AudioEngine(_PassthroughChain(), on_meter_update=lambda *args: meter_calls.append(args))
+        engine = _make_primed_engine(_PassthroughChain(), on_meter_update=lambda *args: meter_calls.append(args))
 
         engine._input_callback(_in_frame(0.9), FRAME_SIZE, None, None)
         engine._output_callback(_out_frame(), FRAME_SIZE, None, None)  # バッファを空にする

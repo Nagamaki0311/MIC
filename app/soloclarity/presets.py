@@ -40,26 +40,30 @@ CLARITY_STAGES: dict[str, ClarityStage] = {
         ),
     ),
     "standard": ClarityStage(
-        highpass_hz=80.0,
+        highpass_hz=75.0,
         bands=(
-            EqBand(200.0, -2.5, 1.2),
-            EqBand(300.0, -1.5, 1.2),
+            EqBand(200.0, -1.5, 1.2),
+            EqBand(300.0, -1.0, 1.2),
             EqBand(2000.0, 1.5, 1.0),
             EqBand(3000.0, 2.0, 1.0),
             EqBand(4000.0, 2.5, 1.0),
         ),
     ),
     "strong": ClarityStage(
-        highpass_hz=90.0,
+        highpass_hz=80.0,
         bands=(
-            EqBand(200.0, -4.0, 1.2),
-            EqBand(300.0, -2.5, 1.2),
+            EqBand(200.0, -2.0, 1.2),
+            EqBand(300.0, -1.5, 1.2),
             EqBand(2000.0, 2.0, 1.0),
             EqBand(3000.0, 3.0, 1.0),
             EqBand(4000.0, 4.0, 1.0),
         ),
     ),
 }
+# D-015: 旧値(standard: hp80/-2.5/-1.5, strong: hp90/-4.0/-2.5)は低い声(f0=110Hz)の
+# 80-350Hz帯を実測でそれぞれ-2.94dB/-4.11dB削っており、低い声の厚みを失わせすぎていた。
+# 緩和後の値では-2.24dB/-2.74dBまで低減しつつ、既存テストが前提とする
+# 「strongはstandardより強くEQをかける」大小関係は維持している。
 
 CLARITY_LEVELS: tuple[str, ...] = ("weak", "standard", "strong")
 
@@ -84,12 +88,19 @@ NOISE_STAGES: dict[str, NoiseStage] = {
         background_wet_dry_mix=0.35, impact_wet_dry_mix=0.15, gate_threshold=0.12, gate_release_ms=350.0
     ),
     "standard": NoiseStage(
-        background_wet_dry_mix=0.80, impact_wet_dry_mix=0.25, gate_threshold=0.20, gate_release_ms=250.0
+        background_wet_dry_mix=0.75, impact_wet_dry_mix=0.25, gate_threshold=0.20, gate_release_ms=250.0
     ),
     "strong": NoiseStage(
-        background_wet_dry_mix=1.00, impact_wet_dry_mix=0.35, gate_threshold=0.25, gate_release_ms=200.0
+        background_wet_dry_mix=0.85, impact_wet_dry_mix=0.35, gate_threshold=0.25, gate_release_ms=200.0
     ),
 }
+# D-015: strongのbackground_wet_dry_mixは旧1.00(RNNoise出力を100%使用)から実測に
+# 基づき0.85へ引き下げた。ファンノイズ単独での減衰量はmix=0.85で約16.5dB(閾値12dB以上
+# を満たす)、mix=0.70では約10.5dB(閾値未達)だった。声帯域(100-4000Hz)損失は
+# 合成音声信号では有意差が測れなかった(RNNoiseが周期的な合成音をほぼ無加工で
+# 通す傾向があるため、実声の複雑さを十分再現できない実測上の限界)ため、mixの
+# 引き下げそのものは「実声でもノイズ処理の副作用を抑える安全マージン」としての
+# 判断も含む。standardも連動して0.80→0.75へ引き下げた。
 
 NOISE_LEVELS: tuple[str, ...] = ("weak", "standard", "strong")
 
@@ -112,8 +123,12 @@ class CompressorParams:
 class AgcParams:
     target_dbfs: float
     max_gain_db: float
-    attack_seconds: float = 2.0
-    release_seconds: float = 4.0
+    # D-015: 旧既定(2.0秒/4.0秒)はCompressorにmakeup gain機構が無い状態では
+    # 数秒の発話区間内に目標音量へ収束しきらず「十分な声量でも遠く/小さく聞こえる」
+    # 原因になっていた。実測(quiet_low_voice相当の入力で±3dB収束: 旧6.8〜8.6秒→
+    # 新2.6〜3.2秒)に基づき短縮した。
+    attack_seconds: float = 0.4
+    release_seconds: float = 1.5
 
 
 # リミッターは全プリセット共通。Compressor/AGC後段でも突発的な大入力
@@ -165,7 +180,11 @@ PRESETS: dict[str, Preset] = {
         label_ja="小さくて低い声＋高品質バックグラウンドノイズ抑制＋弱いインパクト音抑制",
         clarity="strong",
         noise="strong",
-        compressor=CompressorParams(-23.0, 2.8, 10.0, 200.0),
+        # D-015: pedalboard.Compressorにmakeup gain機構が無いため、旧値
+        # (threshold -23.0dB, ratio 2.8)は過剰なgain reductionを起こしAGCの
+        # 負担を増やしていた。thresholdを上げ・ratioを緩め・attackをやや遅くして
+        # 圧縮量そのものを抑え、音量の持ち上げはAGC(時定数短縮済み)に委ねる。
+        compressor=CompressorParams(-20.0, 2.2, 15.0, 200.0),
         agc=AgcParams(target_dbfs=-17.0, max_gain_db=12.0),
     ),
 }

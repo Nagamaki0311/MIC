@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import platform
 import threading
 import time
@@ -697,7 +698,12 @@ class App(tk.Tk):
             attack_ms=s["compressor_attack_ms"],
             release_ms=s["compressor_release_ms"],
         )
-        agc = presets.AgcParams(target_dbfs=s["agc_target_dbfs"], max_gain_db=s["agc_max_gain_db"])
+        # attack/release抜きでAgcParamsを再構築すると、既定値(dataclassのdefault)に
+        # 引き戻ってしまいプリセットの値から外れる(D-015)。既存のAgcParamsを
+        # dataclasses.replaceし、target_dbfs/max_gain_db以外を維持する。
+        agc = dataclasses.replace(
+            self.chain.agc_params, target_dbfs=s["agc_target_dbfs"], max_gain_db=s["agc_max_gain_db"]
+        )
 
         self.chain.set_clarity_stage(clarity_stage)
         self.chain.set_noise_stage(noise_stage)
