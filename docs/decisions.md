@@ -739,3 +739,14 @@ Step0の実測により、上記「決定」1(dry/wetパスの時間整列)の�
 - Step0-5(background_wet_dry_mix)は、声帯域損失側の指標が合成音声モデルの限界により弁別力を持たなかったため、最終値(0.85/0.75)は実測による最適化ではなく計画時の推奨初期値をそのまま採用した判断である。
 - ゲートのフロア化(-18dB)により、無音時にわずかな残留ノイズが常時聞こえるようになる(意図的なトレードオフ)。実機での許容可否確認が必要。
 - Step7(priming)導入により起動直後・アンダーラン後に最大+20ms程度の追加無音区間が生じる。実機での体感確認が必要。
+
+### Reviewer差し戻し(1巡目): Critical1件・Medium1件
+
+**Critical(CONFIRMED)**: Step0-1「RNNoiseの入出力遅延は0サンプル」という結論は測定バグによる誤りだった。`RNNoiseState.process()`(`rnnoise.py`)は`rnnoise_process_frame(state, ptr, ptr)`と**同一ポインタをin/out両方に渡すin-place処理**であり、`app/tests/test_rnnoise_wrapper.py`の遅延測定テストが渡していた「連続なfloat32配列のスライス」は`np.ascontiguousarray`でコピーされずビューのまま処理されるため、**呼び出し元の入力配列自体がdenoise後の値で上書き**されていた。この結果、遅延比較用の「元の入力」が実質的に出力と同一信号になり、真の遅延の有無に関わらず機械的に0付近を返す構造的なバグだった(本番コード`chain.py`自体は`float32_to_pcm16_scale`が乗算により新規配列を確保するため、このエイリアシングの影響を受けない。影響は測定テストのみ)。Reviewerが3つの独立した方法(修正後の位相ベース測定、探索窓を広げた広帯域相互相関、インパルス応答的なバースト注入検証)で再測定した結果、いずれも**約2フレーム(960サンプル、20ms)相当の遅延が存在する**ことを示した。これによりD-015の「Step1(dry/wetパスの時間整列)は不要」という判断の前提が崩れ、Plannerが元々コムフィルタとして特定していた構造的欠陥(「声が遠い/こもる」の主要因の一つとされていた)が未修正のまま残っている可能性がある。
+
+**Medium(CONFIRMED)**: `AutomaticGainControl.set_params()`は係数のみを更新し、既存の`self._gain`を新しい`min_gain_linear`/`max_gain_linear`でクランプし直さない。プリセット切替(`set_preset`)で`max_gain_db`がより小さい値へ変わった直後、発話が非アクティブ(凍結中)だと、古いプリセットで収束した(より大きい)ゲインがクランプされないまま維持され、新プリセットが許可する範囲を超えたゲインが非発話フレーム(背景ノイズ等)にそのまま適用され続ける。実測で`quiet_low_voice`(max_gain 12dB)から`natural`(max_gain 6dB)への切替直後にゲイン12dBが維持されることを確認した。
+
+対応方針(Developerへの差し戻し事項):
+1. `test_rnnoise_wrapper.py`の遅延測定テストで`state.process()`へ渡すフレームを`.copy()`し、エイリアシングを断つ。`RNNoiseState.process()`自体もin-place破壊的処理であることをdocstringに明記するか、内部で防御的にコピーする。
+2. 修正後の測定方法で真の遅延量を再確定し、Step1(dry/wetパスの時間整列、1フレーム遅延バッファをdry側に挿入)の実施要否を再判断する(今回の実測(約2フレーム)が再現するなら実施が必要)。
+3. `AutomaticGainControl.set_params()`(または`process()`の凍結分岐)で、既存の`self._gain`を新しい`min_gain_linear`/`max_gain_linear`へクランプし直す。
