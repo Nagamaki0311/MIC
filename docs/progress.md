@@ -4,6 +4,120 @@
 
 ---
 
+## 2026-08-14 T-008完了、version 1.3.0確定
+
+### 実施内容
+- Reviewer3巡目が、1巡目(Critical1件: RNNoise遅延測定バグ、Medium1件: AGCクランプ漏れ)・2巡目(Medium1件: speech_prob未整列)の指摘がすべて解消されていることを、コード読解・独立した再実行・回帰前後比較に加え、これまで未実施だった`tests/soak_chain.py`(10万フレームのソークテスト)も実行して確認し、「このままマージしてよい」と最終承認した。
+- `docs/tasks.md`のT-008を完了に更新した。
+- `app/soloclarity/__init__.py`の`__version__`を`1.2.1`→`1.3.0`へ変更(処理チェーンの構造変更(dry/wet整列・ゲートのフロア化・発話状態の一元化)と既定プリセット値の変更を含むため、D-008のバージョニング方針に従いマイナーバージョンを上げる判断)。
+
+### 結果
+- このLinux環境での最終確認: `pytest tests/`(soak含む) 145+1 passed、`pyflakes soloclarity tests` 警告0件、`bench_chain.py` 8.3〜12.6%(閾値30%未満)、`soak_chain.py` メモリ・処理時間劣化なし。
+- 3巡にわたるレビューを通じ、実機報告(声のプツプツ途切れ・遠い/小さい声・デフォルトプリセットのノイズ抑制過多)の根本原因として、(1)RNNoise出力の2フレーム(20ms)遅延を無視したdry/wetブレンドによるコムフィルタ、(2)ゲートのヒステリシス欠如+完全ミュート+フレーム境界不連続、(3)Compressorにmakeup gainが無くAGCの時定数が遅すぎたこと、を特定・解消した。特に1巡目でDeveloper自身の初回実測(「遅延0サンプル」)が測定バグによる誤りだったとReviewerが指摘し、真の遅延を再測定してdry/wet整列を実装し直した点、2巡目でその整列がspeech_probには及んでいなかった副作用をReviewerが発見した点は、敵対的検証が実際に機能した具体例。
+- Windows実機・Discordでの実際の聞こえ方(声の途切れ・遠さ・自然さ、無音時の残留ノイズ、累積遅延+40msの体感)は、このLinux環境では引き続き検証不可能。`app/WINDOWS_VERIFICATION_CHECKLIST.md`に沿ったユーザー側での確認が必要。
+
+### 次回開始位置
+- コミット・PR作成・GitHub ActionsのCI実行結果を確認し、成功していればPRをマージして最終Artifact(`SoloClarity-v1.3.0-{ビルド日}`)のダウンロードリンクをユーザーへ案内する。
+
+## 2026-08-14 T-008 Reviewer差し戻し(2巡目)対応実装
+
+### 実施内容
+- Reviewerが1巡目対応(commit 2465039)を独立再現実験で確認した上で発見した新規Medium指摘に対応: dry/wet整列で`denoised`/`aligned_dry`(オーディオパス全体)は`DRY_DELAY_FRAMES`(2フレーム)遅延させたが、RNNoiseが返す`speech_prob`(遅延無し、フレームnのリアルタイム推定値)は整列せずそのまま`SpeechActivityTracker`へ渡していたため、ゲート・AGCが「今処理中のオーディオ」より約20ms未来の発話確率で開閉・凍結判定していた。
+- `chain.py`の`VoiceChain.__init__`に`self._speech_prob_delay_buffer: deque[float]`(`maxlen=DRY_DELAY_FRAMES`、`0.0`で初期化)を追加し、`process()`内で`aligned_dry`と同じ位置で`aligned_speech_prob`を取り出し、`self._speech_tracker.update(aligned_speech_prob)`へ変更した。`process()`の戻り値`speech_prob`は既存のdocstring文言との一貫性を優先し、整列前の生値のまま返すこととした。
+- 回帰テストを追加: `test_chain.py`に`TestSpeechProbTimeAlignment`(無音→声様バーストの立ち上がりで、`speech_active`が`True`になるフレームと出力オーディオRMSが定常状態の半分を超えるフレームが一致することを確認)。手元で整列前の修正前コードに戻して実行すると、2フレーム(`DRY_DELAY_FRAMES`)分ズレて実際に失敗することを確認した。
+- `docs/decisions.md`のD-015に実装内容・確認結果を追記した。
+
+### 結果
+- `pytest tests/`(soak_chain.py除く)145 passed(既存144件+新規1件)、3回連続実行でフレーキーな失敗なし。既存の`TestQuietLowVoicePresetRealWorldScenarios`(16シナリオ)・`test_gate.py`・`test_agc.py`もすべて引き続きpass。`pyflakes soloclarity tests`警告0件。`python -m tests.bench_chain`: 1フレームあたり平均1.26ms(予算10msの12.6%、閾値30%未満)。
+
+### 次回開始位置
+- Reviewerによる2巡目修正の検証を依頼する。承認後、Managerが`docs/tasks.md`のT-008を完了とし、バージョン1.3.0として確定・ビルドする(コミットもManagerが最終確認後に行う)。
+
+## 2026-08-14 T-008 Reviewer差し戻し(1巡目)対応実装
+
+### 実施内容
+- **Critical対応**: `test_rnnoise_wrapper.py`の遅延測定テストで`state.process()`へ渡す全フレームを`.copy()`し、in-placeエイリアシングのバグを修正。`rnnoise.py`の`RNNoiseState.process()`docstringに破壊的処理である旨を明記した。
+- 修正後の3つの独立した手法(探索窓を広げた広帯域チャープの相互相関、インパルス応答的なバースト注入、位相ラップを解決したgroup delay測定)で真の遅延量を再測定し、いずれも**2フレーム(960サンプル、20ms)**で一致することを確認(Reviewerの実測と一致)。
+- `chain.py`に`DRY_DELAY_FRAMES=rnnoise_mod.OUTPUT_DELAY_FRAMES`(2)分のdry(highpassed)信号遅延バッファを追加し、denoised出力と時間整列させてからblendするよう変更。`TransientDetector`も整列後のdry信号に対して計算するよう変更。
+- 副次的に発覚した問題: dry/wet整列により`pedalboard.Limiter`単体のアタックが瞬間的なフルスケール立ち上がりに間に合わずceilingを超えるオーバーシュートが露呈(整列前は偶然のタイミングで隠れていただけと判明)。Limiter出力への最終的な`np.clip`によるハードクリップを安全網として追加した。
+- **Medium対応**: `agc.py`の`AutomaticGainControl.set_params()`で既存の`self._gain`を新しい`min_gain_linear`/`max_gain_linear`へクランプし直すよう修正。
+- 回帰テストを追加: `test_rnnoise_wrapper.py`にバースト注入による遅延測定テストを新規追加し、期待遅延との一致を検証する形へ既存2テストを書き換えた。`test_chain.py`に`TestDryWetTimeAlignment`(コムフィルタ解消の回帰テスト、`make_voice_like_signal`+mix固定0.5+EQ/Compressor/AGC/Gate実質無効化)を追加。`test_agc.py`にAGCクランプの回帰テストを追加。いずれも手元で修正前コードに対して実行すると失敗することを確認した。
+- 副作用: dry/wet整列バッファ追加による起動直後の追加無音区間により、`test_app_gui.py`の1テストが偶発的にfalse-failするようになったため、`_process_settled`ヘルパー(両方のバッファを通過させてから比較)へ変更した。
+- `docs/decisions.md`のD-015に実装内容・再測定結果・確認結果を追記した。
+
+### 結果
+- `pytest tests/`(soak_chain.py除く)144 passed(既存141件+新規3件)、3回連続実行でフレーキーな失敗なし。`pyflakes soloclarity tests`警告0件。`python -m tests.bench_chain`: 1フレームあたり平均1.22ms(予算10msの12.2%、閾値30%未満)。
+
+### 次回開始位置
+- Reviewerによる2巡目の検証を依頼する。承認後、Managerが`docs/tasks.md`のT-008を完了とし、バージョン1.3.0として確定・ビルドする。
+
+## 2026-08-13 T-008 Reviewer差し戻し(Critical1件・Medium1件)
+
+### 実施内容
+- Developer実装(commit 8f562e4)をReviewerが敵対的検証し、Critical1件・Medium1件を発見、差し戻しとなった。
+- **Critical**: D-015 Step0-1「RNNoiseの入出力遅延は0サンプル」という結論が測定バグ(`RNNoiseState.process`のin-place処理に対し、テストがコピーせずビューを渡していたため入力配列自体が上書きされていた)による誤りだったと判明。Reviewerが3つの独立した方法で再測定した結果、実際は約2フレーム(20ms)の遅延がある。これにより「dry/wet整列(Step1)は不要」という判断の前提が崩れ、Plannerが特定していたコムフィルタ仮説(「声が遠い/こもる」の主要因の一つ)が未修正のまま残っている可能性がある。
+- **Medium**: プリセット切替直後、非発話中(凍結中)はAGCゲインが新しいmax_gain_dbでクランプされず、古いプリセットのゲインが背景ノイズ等に適用され続ける。
+- `docs/decisions.md`のD-015に差し戻し内容と対応方針を追記した。
+
+### 結果
+- 実装は未確定。Developerへ再修正を委任する。
+
+### 次回開始位置
+- Developerに、(1)遅延測定テストの修正・真の遅延量の再測定、(2)その結果に基づくdry/wet整列の実施要否再判断・必要なら実装、(3)AGCゲインのクランプ修正、を依頼する。
+- 完了後、Reviewerによる2巡目の検証を経て、承認後にバージョン1.3.0として確定・ビルドする。
+
+## 2026-08-14 T-008実装完了、Reviewer検証待ち
+
+### 実施内容
+- Step0(着手前の実測、使い捨てスクリプト): RNNoiseの入出力遅延を2手法(チャープ信号の広帯域相互相関・複数周波数での位相ベースgroup delay測定)で実測し、いずれも**0サンプル**(D-015の仮説だった1フレーム遅延は再現せず)と判明。既存`make_low_voice_signal`の発話確率が平均0.023にとどまることを確認し、ビブラート・トレモロ・微小ブレスノイズを加えた`make_voice_like_signal`を新設(f0=110Hz/210Hzで発話確率0.9以上を実測)。ゲートのチャタリング(ノイズ混入時にgate._gainが0.0=完全ミュートまで頻繁に落ちる)、AGC収束時間(旧2.0s/4.0sで6.8〜8.6秒、新0.4s/1.5sで2.6〜3.2秒)、background_wet_dry_mix(ノイズ単独減衰: mix0.85で16.5dB)、明瞭度strongのEQ低域損失(hp90/-4.0/-2.5で-4.1dB→hp80/-2.0/-1.5で-2.7dB)を実測。詳細な数値はdocs/decisions.md D-015追記参照。
+- Step1(dry/wetパスの時間整列)は、Step0-1で遅延0サンプルと確認されたため**実施しなかった**(承認済み方針どおりD-015へ追記)。将来のRNNoise更新での検知用に`tests/test_rnnoise_wrapper.py`へ2種類の遅延回帰テストを追加した。
+- Step2: `gate.py`に`SpeechActivityTracker`(ヒステリシス+hangover200ms)を新設し、`SpeechProbabilityGate`を完全ミュート(0.0)からフロア(`GATE_FLOOR_DB=-18.0dB`)へのダッキングへ変更、ゲインもフレーム内線形ランプ(`np.linspace`)に変更した。シグネチャを`apply(frame, speech_active: bool)`へ変更。
+- Step3: `agc.py`の`freeze_speech_prob_threshold`を削除し`process(frame, speech_active: bool)`へ変更、ゲイン適用をフレーム内線形ランプ化、`presets.AgcParams`の既定attack/releaseを2.0/4.0→0.4/1.5へ変更。
+- Step4: `chain.py`に`SpeechActivityTracker`を配線し、AGC・ゲート両方へ`speech_active`を共有。`set_noise_stage`/`set_agc`を`set_params`方式に変更し、詳細設定スライダー操作のたびに内部状態(ゲイン・エンベロープ・hangoverカウンタ)がリセットされていた副次バグを修正。
+- Step5: `presets.py`の`NOISE_STAGES["strong"].background_wet_dry_mix`を1.00→0.85(standard: 0.80→0.75)、`CLARITY_STAGES["strong"]`をhp90→80Hz・200Hz-4.0→-2.0dB・300Hz-2.5→-1.5dB(standardも連動して緩和)、`quiet_low_voice`のCompressorをthreshold-23.0→-20.0dB・ratio2.8→2.2・attack10→15msへ変更。
+- Step6: `gui/app.py`の`_apply_slider_values_to_chain`を`presets.AgcParams(...)`直接構築から`dataclasses.replace(self.chain.agc_params, ...)`へ変更し、スライダー操作でattack/releaseがプリセット既定値から外れるバグを修正。`VoiceChain`に`agc_params`属性を新規公開。
+- Step7(ジッタバッファのpriming): 他Stepのテストが安定した後に追加。`PRIME_TARGET_FRAMES=2`と`_primed`フラグを`engine.py`に追加し、バッファが2フレーム溜まるまで出力側は無音を維持、アンダーラン時は`_primed=False`へ戻し再充填する設計にした。既存`test_engine.py`の「1フレームpushで即pop出力」前提のテストは`engine._primed=True`を直接設定して前提を保ち、priming自体の振る舞いは新設`TestPriming`クラスで別途検証した。
+- Step8: `test_chain.py`に`make_voice_like_signal`・`frame_rms_series`・`assert_no_dropouts`・`assert_no_frame_boundary_clicks`を追加し、`TestQuietLowVoicePresetRealWorldScenarios`をユーザー指定の16シナリオへ再構成した。`test_gate.py`/`test_agc.py`をシグネチャ変更・新時定数・`SpeechActivityTracker`単体テストへ更新。`test_engine.py`にpriming関連のテストを追加。`test_rnnoise_wrapper.py`へ遅延回帰テストを追加(既存のRNNoiseラッパーテストは保持したまま追記、当初Writeで誤って全置換しかけたのを気づいて復元した)。
+
+### 結果
+- `pytest tests/`(soak_chain.py除く)141 passed(既存123件相当+新規18件)、3回連続実行でフレーキーな失敗なし。`pyflakes soloclarity tests`警告0件。
+- `python -m tests.bench_chain`: 1フレームあたり平均1.35ms(予算10msの13.5%、閾値30%未満)。`tests/soak_chain.py`: 10万フレーム処理でRSS成長比1.007倍・処理時間劣化比1.174倍、いずれも合格。
+- pre-fixコード(git HEAD時点のgate.py/agc.py/chain.py/presets.py)に対して新しい16シナリオテストを実行し、32件中3件(シナリオ6「もしもし反復」・7「小さい声の朗読」・12「発声→無音」)が実際に失敗(フレーム境界クリック検出)、修正後は全てpassすることを確認した。残り29件は主に合成音声モデルが安定して発話確率0.9以上を示すため旧実装でも偶然パスしており、回帰検出力は限定的(詳細・懸念はD-015追記参照)。
+- `docs/tasks.md`のT-008を「実装中」→「レビュー中」に更新(完了はReviewer検証後にManagerが行う)。`docs/decisions.md`のD-015へ実測結果・最終確定パラメータ・未解決の懸念を追記した。
+- `app/soloclarity/__init__.py`の`__version__`は未変更(1.3.0への変更はReviewer承認後)。`app/WINDOWS_VERIFICATION_CHECKLIST.md`に今回変更分の確認項目(遅延増加の体感・ゲートフロア化での残留ノイズ・16シナリオの主観評価)を追加した。
+
+### 次回開始位置
+- Reviewerによる敵対的検証。特に確認してほしい点: (1) Step0-5(background_wet_dry_mix)の実測が合成音声モデルの限界で弁別力を持たず計画時の推奨初期値0.85をそのまま採用した判断の妥当性、(2) 16シナリオのうち回帰検出力を確認できたのは3件にとどまる点、(3) ゲートのフロア化・primingが持つ意図的なトレードオフ(残留ノイズ・追加遅延)の許容可否。
+- Reviewer承認後、Managerが`docs/tasks.md`のT-008を完了へ更新し、`__version__`を1.3.0へ変更してビルドする。
+
+## 2026-08-13 T-008計画確定、Developerへ委任
+
+### 実施内容
+- 実機テスト結果(声の途切れ・遠い/小さい声・デフォルトプリセットのノイズ抑制が最大)を受け、Manager調査で仮説(background_wet_dry_mix=1.0、ゲートのチャタリング、AGCの収束遅延、EQ低域カット過多)を特定し、Plannerへ計画作成を委任した。
+- Plannerが既存コードとpedalboard/RNNoiseの一次ソースを調査し、Managerの仮説を上回る精度で3つの構造的欠陥を特定した: (1) RNNoise出力が入力より1フレーム(10ms)遅れるため、dry/wetブレンドが未整列のコムフィルタになっている、(2) ゲートがヒステリシスなし・完全ミュート・フレーム境界不連続の設計で「プツプツ」の直接原因、(3) pedalboard.Compressorにメイクアップゲインが無く、AGCの時定数(2秒/4秒)が遅すぎて発話中に収束しない。
+- Managerが実装方針を承認し`docs/decisions.md`にD-015として記録した(dry/wet整列、ゲートのフロア付きダッキング化、AGC時定数短縮、デフォルトプリセットのbackground_wet_dry_mix実測ベース再調整、EQ低域カット緩和、副次バグ2件の修正)。
+
+### 結果
+- 実装はまだ着手していない(Developerへ委任する直前)。
+
+### 次回開始位置
+- Developer agentへ実装を委任する(Step 0の実測→構造修正→パラメータ確定→テスト→ビルドの順)。
+- 完了後、Reviewerによる敵対的検証(16シナリオ)を経てバージョン1.3.0として確定・ビルド・ユーザーへ提示する。
+
+## 2026-08-13 T-007 PR #7マージ完了、v1.2.1ビルド公開
+
+### 実施内容
+- PR #7(`claude/current-setup-environment-65p1il` → `main`)を作成し、GitHub Actionsのビルド(`Build Windows executable`, run 31688971643)が成功したことを確認した後、draft解除・squashマージした(マージコミット`07a4e00`)。
+- Artifact `SoloClarity-v1.2.1-20260813`(40.9MB)が生成されていることを確認した。
+- PRの購読を解除した(マージ完了により監視終了)。
+
+### 結果
+- `main`ブランチが`07a4e00`まで進み、v1.2.1が最新版として確定した。
+- ダウンロード: https://github.com/Nagamaki0311/MIC/actions/runs/31688971643 のArtifacts欄から`SoloClarity-v1.2.1-20260813`を取得可能(Artifactの保持期限は2026-09-12まで)。
+
+### 次回開始位置
+- ユーザーによるWindows実機での確認待ち(`app/WINDOWS_VERIFICATION_CHECKLIST.md`、特にT-007で追加した見切れ解消・リサイズ・閉状態でのウィンドウサイズの3項目)。次のタスクが来るまでは待機。
+
 ## 2026-08-13 T-007完了、version 1.2.1確定
 
 ### 実施内容

@@ -46,6 +46,14 @@ ErrorCallback = Callable[[str], None]
 # (2〜6フレーム=20〜60ms)の中間値を採用した。
 JITTER_BUFFER_FRAMES = 4
 
+# D-015: 起動直後・アンダーラン直後にバッファがこの数に達するまでは出力側で
+# 無音を書き、ポップを始めない(priming)。入出力2ストリームは別スレッド駆動
+# のため、起動直後は出力側コールバックの方が先に走ることがあり、priming無しでは
+# バッファが空のまま無音を書き続け、その後クロックドリフトのたびに周期的な
+# アンダーラン(無音挿入)が起きやすい。+20ms程度の追加遅延と引き換えに、
+# 立ち上がりを安定させる。
+PRIME_TARGET_FRAMES = 2
+
 
 class _FrameRingBuffer:
     """入力側コールバックスレッドと出力側コールバックスレッドの間でフレームを
@@ -99,6 +107,7 @@ class AudioEngine:
         self._input_meter = LevelMeter()
         self._output_meter = LevelMeter()
         self._buffer = _FrameRingBuffer(JITTER_BUFFER_FRAMES)
+        self._primed = False
         # 出力側コールバックが直近の入力メーター値を参照するための共有状態。
         # タプルへの再代入はCPythonでは単一のSTORE_ATTR/LOAD_ATTRで完結し、
         # 読み取り側が新旧混在の値(部分更新)を観測することはないため、
@@ -140,10 +149,30 @@ class AudioEngine:
         if status:
             # アンダーラン等のPortAudio警告。無音で埋めて継続する。
             pass
+
+        if not self._primed:
+            if len(self._buffer) >= PRIME_TARGET_FRAMES:
+                self._primed = True
+            else:
+                # priming中(バッファがPRIME_TARGET_FRAMESに達するまで)は無音を
+                # 書き、まだポップしない(バッファに溜め始めた直後に食いつぶして
+                # すぐアンダーランへ戻る、という往復を避ける)。
+                frame = np.zeros(frames, dtype=np.float32)
+                out_rms, out_peak = self._output_meter.update(frame)
+                if self.on_meter_update is not None:
+                    in_rms, in_peak = self._last_input_levels
+                    self.on_meter_update(in_rms, in_peak, out_rms, out_peak)
+                outdata[:, 0] = frame
+                return
+
         frame = self._buffer.pop()
         if frame is None:
             # ジッタバッファが空(起動直後・クロックドリフト等による一時的な
             # アンダーラン)。ノイズや未初期化メモリを出力しないよう無音を書く。
+            # 再度priming状態へ戻し、バッファがPRIME_TARGET_FRAMES分溜まるまで
+            # 出力を再開しない(アンダーランのたびに即座にポップを再開すると、
+            # クロックドリフトで周期的なアンダーランが繰り返されやすいため)。
+            self._primed = False
             frame = np.zeros(frames, dtype=np.float32)
 
         # 出力メーターは実際に書き出す値(アンダーラン時の無音を含む)を測る。
