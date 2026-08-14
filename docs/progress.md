@@ -4,6 +4,25 @@
 
 ---
 
+## 2026-08-14 T-009 明瞭度EQ高域ブースト形状の再設計(実装)
+
+### 実施内容
+- D-016で承認済みの方針(2kHz〜4kHzのブースト形状を「単調増加」から「2kHz付近でピーク、4kHzへ向けて緩やかに減衰」へ変更)に基づき実装した。
+- 着手前に`_build_eq_board`(PeakFilter束)+highpassの合成に対する周波数応答を単一正弦波スイープで実測(使い捨てスクリプト、`app/`外のスクラッチパッドで実行、リポジトリには残していない)。Q=1.0による隣接帯域の重なりにより、修正前の実効ゲインピークは`gain_db`が最大の4000Hzそのものではなく3000-3500Hz付近になっていることを確認した(strong: 2000Hz +4.89dB / 3500Hz(ピーク) +7.22dB / 4000Hz +6.77dB)。
+- 実測に基づき、既存のバンド周波数・Qは維持したまま`gain_db`のみ調整(新規バンド追加なし、判定ラダーに従う)。`CLARITY_STAGES`の2000/3000/4000Hzを、weak: +1.5/+0.7/+0.1、standard: +3.0/+1.5/+0.3、strong: +5.0/+2.5/+0.5へ変更(低域200/300Hzは無変更)。修正後の実効ゲインは全段階で2000Hz > 4000Hzとなり、strongの2000-4000Hz帯域エネルギー比(声量感の目安)は旧4.422倍→新3.993倍(約10%減)に留めた。
+- `app/tests/test_chain.py`の`TestClarityEq`に回帰テスト2件を追加(`test_effective_gain_peaks_near_2khz_then_decays_toward_4khz`、`test_effective_gain_at_2khz_and_4khz_stronger_with_higher_level`)。修正前の値に対して実際に失敗すること(2kHzより4kHzの実効ゲインが高い)を確認済み。
+- `app/WINDOWS_VERIFICATION_CHECKLIST.md`に、マイクとの距離を変えた場合の聞こえ方(近接効果との相互作用、耳障りな聞こえ方の確認)の項目を追加。
+- `docs/decisions.md`のD-016に実測値・確定パラメータ・テスト結果の追記を行った(新規Dエントリは作らず追記のみ)。
+
+### 結果
+- `pytest tests/ --ignore=tests/soak_chain.py` 149 passed(既存145+新規4)、3回連続実行いずれもall pass。
+- `pyflakes soloclarity tests` 警告0件。
+- `python -m tests.bench_chain` 平均0.74ms/frame、budget usage 7.4%(閾値30%未満、EQバンド数不変のため影響は軽微)。
+- `docs/tasks.md`のT-009は完了にせず、Reviewer検証待ちの状態のまま残した。
+
+### 次回開始位置
+- Reviewerによる検証(実測の妥当性、回帰テストの意味、既存機能への影響)待ち。承認後にManagerがT-009を完了に更新し、バージョン番号(D-016では1.3.1想定)を確定する。
+
 ## 2026-08-14 T-008 PR #8マージ完了、v1.3.0ビルド公開
 
 ### 実施内容

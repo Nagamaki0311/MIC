@@ -827,3 +827,79 @@ Researcherが「男性の低い声の明瞭化」に関する音響工学的知�
 - 変更対象は`app/soloclarity/presets.py`の`CLARITY_STAGES`(2000/3000/4000Hzの`gain_db`、必要なら`q`も)、および関連するテスト(`test_chain.py`等の周波数応答検証)。
 - 既存の`ADVANCED_SLIDER_SPECS`(GUI詳細設定)の文言・範囲は変更不要(既存スライダーの範囲内で対応可能な変更のため)。
 - 実装はDeveloperへ委任し、周波数応答の実測→パラメータ確定→回帰テスト→Reviewer検証の順で進める。バージョンはEQカーブの調整のみであれば1.3.1(パッチ)を想定するが、最終的な変更範囲次第でManagerが確定する。
+
+### 追記(実装結果): 実測値・確定パラメータ・テスト結果
+
+#### 実測: 現行(修正前)の実効ゲインカーブ
+`_build_eq_board`(PeakFilter束)+`_build_highpass_board`の合成に対し、単一周波数の
+正弦波(定常状態のRMS比、`reset=True`でフィルタの初期過渡を避けて後半半分のみ計測)
+をスイープして実効ゲインを実測した(使い捨てスクリプト、リポジトリには残していない)。
+
+```
+weak     (hp=60Hz):  2000Hz +1.36dB  2500Hz +1.78dB  3000Hz +2.01dB  3500Hz +2.03dB(実効ピーク)  4000Hz +1.88dB
+standard (hp=75Hz):  2000Hz +3.37dB  2500Hz +4.21dB  3000Hz +4.68dB  3500Hz +4.73dB(実効ピーク)  4000Hz +4.40dB
+strong   (hp=80Hz):  2000Hz +4.89dB  2500Hz +6.24dB  3000Hz +7.06dB  3500Hz +7.22dB(実効ピーク)  4000Hz +6.77dB
+```
+
+各`PeakFilter`のQ=1.0による帯域間の重なりにより、`gain_db`が最大の4000Hzバンド
+そのものではなく3000-3500Hz付近に実効ゲインのピークが生じていた(4000Hzの
+`gain_db`をそのまま実効ゲインと読み替えられない、というResearcherの懸念が実測で
+裏付けられた)。いずれの段階も2000Hzは実効ピークより明確に低く、「2kHzでピーク、
+4kHzへ向けて減衰」というSonarの形とは逆に、5-8kHz(耳障り/歯擦音帯域)側へ向けて
+まだ持ち上がっていく途中の形になっていた。
+
+#### 決定: 確定パラメータ
+既存のバンド周波数(200/300/2000/3000/4000Hz)とQをすべて維持したまま、判定ラダーに
+従い新規バンド追加を避け、`gain_db`の調整のみで対応した(実測の結果、周波数・Qの
+変更までは不要と判断)。
+
+```python
+CLARITY_STAGES = {
+    "weak":     highpass=60Hz  200Hz:-1.0 300Hz:-0.5 2000Hz:+1.5 3000Hz:+0.7 4000Hz:+0.1
+    "standard": highpass=75Hz  200Hz:-1.5 300Hz:-1.0 2000Hz:+3.0 3000Hz:+1.5 4000Hz:+0.3
+    "strong":   highpass=80Hz  200Hz:-2.0 300Hz:-1.5 2000Hz:+5.0 3000Hz:+2.5 4000Hz:+0.5
+}
+```
+
+低域(200/300Hzのgain_db・highpass_hz)は決定どおり無変更。2000/3000/4000Hzの比を
+概ね10:5:1(strongで+5.0/+2.5/+0.5)に再配分し、2000Hzのgainを引き上げ・3000Hz/4000Hz
+のgainを引き下げることで、実効ゲインのピークを2000-2500Hz付近へ寄せた。
+
+修正後の実効ゲイン実測(strong):
+```
+2000Hz +6.55dB  2500Hz +6.52dB(実効ピーク)  3000Hz +5.74dB  3500Hz +4.76dB  4000Hz +3.82dB
+```
+2000Hzでの実効ゲイン(+6.55dB)・4000Hzでの実効ゲイン(+3.82dB)は、Sonarの
+「2kHzで+5〜6dB、5kHzで+3dB」という傾斜の"形"(絶対値はSoloClarity独自にhighpass込み
+で調整)に近い。weak/standardも同じ比で連動して調整し、3段階とも2000Hzの実効ゲインが
+4000Hzの実効ゲインを明確に上回る形へ変更した(weak: +1.92dB vs +1.05dB、standard:
++3.93dB vs +2.28dB、strong: +6.55dB vs +3.82dB)。
+
+声量感とのバランス: 合成音声信号(`make_low_voice_signal`, f0=130Hz)に対する
+2000-4000Hz帯域のエネルギー比(処理後/処理前)は、strongで旧4.422倍→新3.993倍
+(約10%減)に留まり、「声がはっきりする」効果自体は維持しつつ耳障り帯域手前への
+過剰なピークだけを緩和できていることを確認した。weak(旧1.517倍→新1.483倍)・
+standard(旧2.691倍→新2.285倍)も同様に大きな後退はない。
+
+#### テスト結果
+`app/tests/test_chain.py`の`TestClarityEq`に2件追加した。
+- `test_effective_gain_peaks_near_2khz_then_decays_toward_4khz`(weak/standard/strong
+  でparametrize): 2000Hzの実効ゲインが4000Hzの実効ゲインを上回ることを検証する。
+  修正前の`CLARITY_STAGES`の値に対して同テストを実行すると、3段階すべてで実際に
+  失敗する(2000Hzの実効ゲインが4000Hzより低い)ことを確認済み。
+- `test_effective_gain_at_2khz_and_4khz_stronger_with_higher_level`: 2000Hz・4000Hz
+  それぞれでweak<standard<strongの大小関係(T-008 D-015で確立した制約)が今回の
+  形状変更後も維持されていることを検証する。
+
+`cd app && python -m pytest tests/ --ignore=tests/soak_chain.py -q`は既存145件+新規4件
+=149件、3回連続実行いずれもall passした。`pyflakes soloclarity tests`は警告0件。
+`python -m tests.bench_chain`はEQバンド数を変えていないため既存同様軽微(1000フレーム
+平均0.74ms/frame、budget usage 7.4%、閾値30%未満)。
+
+#### 未解決の懸念
+- マイクとの距離(近接効果)との相互作用は今回も実装変更を伴わない(決定3のとおり
+  据え置き)。`WINDOWS_VERIFICATION_CHECKLIST.md`に確認項目を追加済み。実機での
+  主観評価が必要。
+- 実効ゲインの実測はいずれも定常正弦波(単一周波数)によるものであり、実声(倍音・
+  過渡・非定常性を含む)での聞こえ方は別途実機確認が必要(既存の合成信号テストの
+  限界と同様)。
