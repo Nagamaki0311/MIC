@@ -4,6 +4,54 @@
 
 ---
 
+## 2026-08-14 T-009完了、version 1.3.1確定
+
+### 実施内容
+- Reviewerが、実効ゲイン測定方法の妥当性・Q=1.0による帯域重なり説明の正確性・strong>standard>weakの大小関係の維持・声量感低下による副作用・200/300Hz変更なしの担保のすべてを独立した再現検証(自前の周波数応答スイープ・修正前コードでの回帰テスト再実行)で裏付け、「このままマージしてよい」と最終承認した。
+- `docs/tasks.md`のT-009を完了に更新した。
+- `app/soloclarity/__init__.py`の`__version__`を`1.3.0`→`1.3.1`へ変更(既存プリセットのパラメータ調整のみで処理チェーンの構造変更を伴わないため、D-008のバージョニング方針に従いパッチバージョンを上げる判断)。
+
+### 結果
+- このLinux環境での最終確認: `pytest tests/`(soak除く) 149 passed、`pyflakes soloclarity tests` 警告0件、`bench_chain.py` 7.6%(閾値30%未満)。
+- ユーザーが共有したSteelSeries SonarのEQカーブを起点に、Researcherが音響工学的知見を調査した結果、SoloClarityの低域カット(200/300Hz)は一般論と整合しており維持、高域寄り(2kHz-4kHz)のブースト形状(周波数が上がるほど強く単調増加)は歯擦音帯域の手前でさらにピークを高める方向で再検討の余地あり、という結論に至った。この知見に基づき2kHz付近でピークを迎え4kHzへ向けて緩やかに減衰する形へEQを再設計した。
+- Windows実機での実際の聞こえ方(耳障りさの軽減、マイク距離による近接効果との相互作用)は、このLinux環境では引き続き検証不可能。`app/WINDOWS_VERIFICATION_CHECKLIST.md`に沿ったユーザー側での確認が必要。
+
+### 次回開始位置
+- コミット・PR作成・GitHub ActionsのCI実行結果を確認し、成功していればPRをマージして最終Artifact(`SoloClarity-v1.3.1-{ビルド日}`)のダウンロードリンクをユーザーへ案内する。
+
+## 2026-08-14 T-009 明瞭度EQ高域ブースト形状の再設計(実装)
+
+### 実施内容
+- D-016で承認済みの方針(2kHz〜4kHzのブースト形状を「単調増加」から「2kHz付近でピーク、4kHzへ向けて緩やかに減衰」へ変更)に基づき実装した。
+- 着手前に`_build_eq_board`(PeakFilter束)+highpassの合成に対する周波数応答を単一正弦波スイープで実測(使い捨てスクリプト、`app/`外のスクラッチパッドで実行、リポジトリには残していない)。Q=1.0による隣接帯域の重なりにより、修正前の実効ゲインピークは`gain_db`が最大の4000Hzそのものではなく3000-3500Hz付近になっていることを確認した(strong: 2000Hz +4.89dB / 3500Hz(ピーク) +7.22dB / 4000Hz +6.77dB)。
+- 実測に基づき、既存のバンド周波数・Qは維持したまま`gain_db`のみ調整(新規バンド追加なし、判定ラダーに従う)。`CLARITY_STAGES`の2000/3000/4000Hzを、weak: +1.5/+0.7/+0.1、standard: +3.0/+1.5/+0.3、strong: +5.0/+2.5/+0.5へ変更(低域200/300Hzは無変更)。修正後の実効ゲインは全段階で2000Hz > 4000Hzとなり、strongの2000-4000Hz帯域エネルギー比(声量感の目安)は旧4.422倍→新3.993倍(約10%減)に留めた。
+- `app/tests/test_chain.py`の`TestClarityEq`に回帰テスト2件を追加(`test_effective_gain_peaks_near_2khz_then_decays_toward_4khz`、`test_effective_gain_at_2khz_and_4khz_stronger_with_higher_level`)。修正前の値に対して実際に失敗すること(2kHzより4kHzの実効ゲインが高い)を確認済み。
+- `app/WINDOWS_VERIFICATION_CHECKLIST.md`に、マイクとの距離を変えた場合の聞こえ方(近接効果との相互作用、耳障りな聞こえ方の確認)の項目を追加。
+- `docs/decisions.md`のD-016に実測値・確定パラメータ・テスト結果の追記を行った(新規Dエントリは作らず追記のみ)。
+
+### 結果
+- `pytest tests/ --ignore=tests/soak_chain.py` 149 passed(既存145+新規4)、3回連続実行いずれもall pass。
+- `pyflakes soloclarity tests` 警告0件。
+- `python -m tests.bench_chain` 平均0.74ms/frame、budget usage 7.4%(閾値30%未満、EQバンド数不変のため影響は軽微)。
+- `docs/tasks.md`のT-009は完了にせず、Reviewer検証待ちの状態のまま残した。
+
+### 次回開始位置
+- Reviewerによる検証(実測の妥当性、回帰テストの意味、既存機能への影響)待ち。承認後にManagerがT-009を完了に更新し、バージョン番号(D-016では1.3.1想定)を確定する。
+
+## 2026-08-14 T-008 PR #8マージ完了、v1.3.0ビルド公開
+
+### 実施内容
+- PR #8(`claude/current-setup-environment-65p1il` → `main`)を作成し、GitHub Actionsのビルド(`Build Windows executable`, run 31782482789)が成功したことを確認した後、draft解除・squashマージした(マージコミット`32bfaed`)。
+- Artifact `SoloClarity-v1.3.0-20260814`(40.9MB)が生成されていることを確認した。
+- PRの購読を解除した(マージ完了により監視終了)。
+
+### 結果
+- `main`ブランチが`32bfaed`まで進み、v1.3.0が最新版として確定した。
+- ダウンロード: https://github.com/Nagamaki0311/MIC/actions/runs/31782482789 のArtifacts欄から`SoloClarity-v1.3.0-20260814`を取得可能(Artifactの保持期限は2026-09-13まで)。
+
+### 次回開始位置
+- ユーザーによるWindows実機・Discordでの確認待ち(`app/WINDOWS_VERIFICATION_CHECKLIST.md`、特に今回のT-008で追加した「声の途切れ」「16シナリオ」「累積遅延+40ms」「無音時の残留ノイズ」の各項目)。次のタスクが来るまでは待機。
+
 ## 2026-08-14 T-008完了、version 1.3.0確定
 
 ### 実施内容

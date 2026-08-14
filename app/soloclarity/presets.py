@@ -34,9 +34,9 @@ CLARITY_STAGES: dict[str, ClarityStage] = {
         bands=(
             EqBand(200.0, -1.0, 1.2),
             EqBand(300.0, -0.5, 1.2),
-            EqBand(2000.0, 0.5, 1.0),
-            EqBand(3000.0, 1.0, 1.0),
-            EqBand(4000.0, 1.0, 1.0),
+            EqBand(2000.0, 1.5, 1.0),
+            EqBand(3000.0, 0.7, 1.0),
+            EqBand(4000.0, 0.1, 1.0),
         ),
     ),
     "standard": ClarityStage(
@@ -44,9 +44,9 @@ CLARITY_STAGES: dict[str, ClarityStage] = {
         bands=(
             EqBand(200.0, -1.5, 1.2),
             EqBand(300.0, -1.0, 1.2),
-            EqBand(2000.0, 1.5, 1.0),
-            EqBand(3000.0, 2.0, 1.0),
-            EqBand(4000.0, 2.5, 1.0),
+            EqBand(2000.0, 3.0, 1.0),
+            EqBand(3000.0, 1.5, 1.0),
+            EqBand(4000.0, 0.3, 1.0),
         ),
     ),
     "strong": ClarityStage(
@@ -54,9 +54,9 @@ CLARITY_STAGES: dict[str, ClarityStage] = {
         bands=(
             EqBand(200.0, -2.0, 1.2),
             EqBand(300.0, -1.5, 1.2),
-            EqBand(2000.0, 2.0, 1.0),
-            EqBand(3000.0, 3.0, 1.0),
-            EqBand(4000.0, 4.0, 1.0),
+            EqBand(2000.0, 5.0, 1.0),
+            EqBand(3000.0, 2.5, 1.0),
+            EqBand(4000.0, 0.5, 1.0),
         ),
     ),
 }
@@ -64,6 +64,13 @@ CLARITY_STAGES: dict[str, ClarityStage] = {
 # 80-350Hz帯を実測でそれぞれ-2.94dB/-4.11dB削っており、低い声の厚みを失わせすぎていた。
 # 緩和後の値では-2.24dB/-2.74dBまで低減しつつ、既存テストが前提とする
 # 「strongはstandardより強くEQをかける」大小関係は維持している。
+# D-016: 旧gain_db(2000/3000/4000Hzが単調増加)は、PeakFilterのQ=1.0による帯域間の
+# 重なりも合わさって実効ゲイン(_build_eq_board+highpassの合成、周波数応答スイープで
+# 実測)のピークが3000-3500Hz付近になり、歯擦音帯域(5-8kHz)の手前でさらにピークを
+# 高めていく形になっていた。2000Hzのgainを引き上げ、3000Hz/4000Hzのgainを引き下げる
+# ことで、実効ゲインのピークを2000-2500Hz付近へ寄せ4000Hzに向けて緩やかに減衰する形
+# (Sonarのカーブの"形"を参考にしつつ絶対値は既存の声量感とのバランスを保つ範囲で調整)
+# へ変更した。実測値・確定根拠はdocs/decisions.md D-016参照。
 
 CLARITY_LEVELS: tuple[str, ...] = ("weak", "standard", "strong")
 

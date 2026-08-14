@@ -34,6 +34,21 @@ def band_energy(signal: np.ndarray, sr: int, low_hz: float, high_hz: float) -> f
     return float(np.sum(spectrum[mask] ** 2))
 
 
+def single_tone_gain_db(board: pedalboard.Pedalboard, freq_hz: float, sr: int = SAMPLE_RATE, n_seconds: float = 2.0) -> float:
+    """単一周波数の正弦波をboardへ通し、定常状態(後半)のRMS比からその周波数での
+    実効ゲイン(dB)を測る(周波数応答スイープの1点)。PeakFilterのQによる隣接帯域との
+    重なりも含めた「合成後の実際のゲイン」を、`gain_db`の値をそのまま見るのではなく
+    実測するためのヘルパー(D-016)。"""
+    n = int(sr * n_seconds)
+    t = np.arange(n) / sr
+    sig = (0.2 * np.sin(2 * np.pi * freq_hz * t)).astype(np.float32)
+    out = board.process(sig, sr, reset=True)
+    half = n // 2
+    in_rms = np.sqrt(np.mean(sig[half:].astype(np.float64) ** 2))
+    out_rms = np.sqrt(np.mean(out[half:].astype(np.float64) ** 2))
+    return float(20.0 * np.log10(out_rms / in_rms))
+
+
 def warm_up_chain(chain: VoiceChain, seed: int, amplitude: float = 0.03, n_frames: int = 120) -> None:
     """定常ノイズをある程度流し、TransientDetector/AGC/ゲートの内部状態(EMA等)を
     無音からの立ち上がり過渡(D-012のfast_env/slow_envがゼロ初期値から実信号レベルへ
@@ -231,6 +246,57 @@ class TestClarityEq:
 
         assert strong_low < weak_low  # 強のほうがより低域を削る
         assert strong_high > weak_high  # 強のほうがより高域を持ち上げる
+
+    @pytest.mark.parametrize(
+        "level",
+        ["weak", "standard", "strong"],
+    )
+    def test_effective_gain_peaks_near_2khz_then_decays_toward_4khz(self, level):
+        """D-016: 2kHz〜4kHzのブースト形状を「周波数が上がるほど強くなる単調増加」
+        から「2kHz付近でピークを迎え、4kHzに向けて緩やかに減衰する」形へ変更した
+        ことの回帰テスト。単一周波数の正弦波(highpass+PeakFilter束の合成)に対する
+        実効ゲインを実測し、2kHzでのゲインが4kHzでのゲインを明確に上回ることを確認する。
+        修正前の`CLARITY_STAGES`(2000/3000/4000Hzが単調増加)ではこのテストは失敗する
+        (4kHzの方が2kHzより実効ゲインが大きくなる)。
+        """
+        sr = SAMPLE_RATE
+        stage = presets.CLARITY_STAGES[level]
+        board = pedalboard.Pedalboard(
+            list(chain_mod._build_highpass_board(stage.highpass_hz))
+            + list(chain_mod._build_eq_board(stage.bands))
+        )
+
+        gain_2k = single_tone_gain_db(board, 2000.0, sr=sr)
+        gain_4k = single_tone_gain_db(board, 4000.0, sr=sr)
+
+        assert gain_2k > gain_4k, (
+            f"{level}: effective gain at 2kHz ({gain_2k:.2f}dB) should exceed 4kHz "
+            f"({gain_4k:.2f}dB) -- boost should peak near 2kHz and decay toward 4kHz"
+        )
+
+    def test_effective_gain_at_2khz_and_4khz_stronger_with_higher_level(self):
+        """strongはstandard/weakより2kHz・4kHzの両方で実効ゲインが強いこと
+        (T-008 D-015で確立した「strongが最も強くEQをかける」大小関係が、
+        今回の形状変更後も両方の代表周波数で維持されていることを確認する)。"""
+        sr = SAMPLE_RATE
+
+        def gains(level: str) -> tuple[float, float]:
+            stage = presets.CLARITY_STAGES[level]
+            board = pedalboard.Pedalboard(
+                list(chain_mod._build_highpass_board(stage.highpass_hz))
+                + list(chain_mod._build_eq_board(stage.bands))
+            )
+            return (
+                single_tone_gain_db(board, 2000.0, sr=sr),
+                single_tone_gain_db(board, 4000.0, sr=sr),
+            )
+
+        weak_2k, weak_4k = gains("weak")
+        standard_2k, standard_4k = gains("standard")
+        strong_2k, strong_4k = gains("strong")
+
+        assert weak_2k < standard_2k < strong_2k
+        assert weak_4k < standard_4k < strong_4k
 
 
 class TestCompressorAgcLimiter:
