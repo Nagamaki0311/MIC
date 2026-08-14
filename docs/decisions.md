@@ -774,3 +774,15 @@ Step0の実測により、上記「決定」1(dry/wetパスの時間整列)の�
 **5. テスト結果**: `pytest tests/`(soak_chain.py除く)144 passed(既存141件+新規3件相当。内訳: `test_chain.py`に`TestDryWetTimeAlignment`1件、`test_agc.py`に1件、`test_rnnoise_wrapper.py`は遅延テスト3件を維持しつつバースト注入1件を新規追加、既存2件を書き換え)、3回連続実行でフレーキーな失敗なし。`pyflakes soloclarity tests`警告0件。`python -m tests.bench_chain`は1フレームあたり平均1.22ms(予算10msの12.2%、閾値30%未満を維持)。
 
 **未解決の懸念**: dry/wet整列バッファの導入により出力全体の遅延がさらに2フレーム(20ms)増加した(jitter buffer priming分と合わせた累積遅延の実機体感確認は`WINDOWS_VERIFICATION_CHECKLIST.md`の既存項目でカバーされる範囲内と判断しているが、Reviewerによる再検証を推奨する)。Limiterのハードクリップ追加は、瞬間的なフルスケール立ち上がりというまれなシナリオでのみ発動する安全網であり、通常の音声レベルでは影響しない(`test_limiter_barely_attenuates_normal_level_signal`が引き続きpassすることで確認済み)。
+
+### Reviewer差し戻し(2巡目): Medium1件(新規)
+
+Reviewerが1巡目の指摘(Critical・Medium)の解消を独立した再現実験(第4・第5の遅延測定手法、修正前コードでのコムフィルタ再現、Limiter超過の実測)ですべて確認した上で、**今回の修正自体が生んだ新規のMedium指摘**を発見した。
+
+**問題**: dry/wet整列により`denoised`/`aligned_dry`(→`blended`以降のオーディオパス全体)は2フレーム(20ms)遅延させたが、`speech_prob`(RNNoiseの`process()`が同じ呼び出しで返す発話確率)は遅延させていない。RNNoiseの`speech_prob`自体はオーディオ出力と異なり遅延が無い(実測でinput onsetと同一call、offset=0)ため、`SpeechActivityTracker.update(speech_prob)`→`speech_active`は「今」(フレームn)の発話確率で判定しているのに対し、それをゲート・AGCが適用する対象は「2フレーム前」(フレームn-2)のオーディオになっている。ゲート/AGCの意思決定が、実際に処理中の音声内容より常に約20ms「未来」の情報に基づいて行われる。
+
+**実測**: 無音→声様バーストへの立ち上がりで、`speech_prob`はバースト開始callで即座に0.996へ立ち上がる(遅延0)のに対し、出力オーディオのRMSがベースラインの半分を超えるのは2フレーム後だった。
+
+**影響**: `SpeechActivityTracker`のヒステリシス/hangover(200ms)判定、AGCの凍結判定のタイミングが本来より20ms早い。200msのhangoverマージンで大部分は吸収される可能性が高くCriticalではないが、T-008全体の主題(発話終端でのゲート早期クローズによる「プツプツ途切れる」症状)に直結するため、未検証のまま残すべきではないとReviewerは判断した。
+
+**対応方針**: `speech_prob`(またはそれに基づく発話状態)も`aligned_dry`と同じ`OUTPUT_DELAY_FRAMES`分の遅延バッファを通し、ゲート/AGCへ渡す前に時間整列する。Developerへ再修正を委任する。
