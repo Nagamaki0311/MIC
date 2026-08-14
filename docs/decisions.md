@@ -640,3 +640,43 @@ D-012で追加した`tk.Canvas`+`ttk.Scrollbar`による縦スクロール対応
 このため、一時grid→grid_removeの処理自体は必要と判断して残し(上記1の「不要になったため削除した」という当初の対応方針を撤回)、Reviewer指摘4(PLAUSIBLE)が推奨した通り`_updating_from_code`ガードでこの区間を囲んだ。あわせて、`min_width`算出に使う`_advanced_outer.winfo_reqwidth()`も、grid_remove後の非mapped状態ではなく実際にgridした(mapped)状態で測るよう変更した(非mapped状態でのLabelFrameのreqwidthは正しい値を返さないことが実測でわかったため)。高さのminsizeには閉状態(grid前)の`self.winfo_reqheight()`を使う(上記1の対応方針)のは変更していない。
 
 再修正後、`cd /home/user/MIC/app && python -m pytest tests/ -q`を3回連続実行し**123 passed**(既存118件 + 新規5件: Canvas幅・resizable・minsize幅・閉状態でのウィンドウ膨張防止・他フレーム非伸縮の5テスト)、フレーキーな失敗なし、`pyflakes soloclarity tests`警告0件を確認した。
+
+---
+
+## D-015: T-008 音声処理パイプライン・デフォルトプリセットの再設計方針
+
+- 日付: 2026-08-13
+- 状態: 採用
+
+### 背景
+実機テストで、「あーーー」「もしもし」等の発声でも声がプツプツ途切れる、十分な声量・距離でも声が遠く/小さく聞こえる、デフォルトプリセットのバックグラウンドノイズ抑制が1.0(最大)になっている、という報告があった。ユーザーからは「小さくて低い声でも自然・近く・明瞭」「声をノイズと誤認して消さない」「バックグラウンドノイズは抑える」「打鍵音等の瞬間音は必要以上に消さない」という設計全体の再検証が明示的に要求された(数値の単純調整ではなく構造的な再検証)。
+
+Plannerが既存コード(`chain.py`/`gate.py`/`agc.py`/`presets.py`/`rnnoise.py`/`engine.py`)とpedalboard/RNNoiseの一次ソース(GitHub)を調査し、以下3つの構造的欠陥を特定した(Manager起票時の仮説を上回る精度の原因分析):
+
+1. **RNNoise出力の1フレーム(10ms)遅延によるdry/wetのコムフィルタ**: RNNoiseの解析窓は`[前フレーム, 今フレーム]`で、出力は前フレーム区間の再構成のため、`rnnoise_process_frame`の戻り値は入力より10ms遅れる。現行の`blended = denoised*mix + highpassed*(1-mix)`は、この遅延を補正せず遅れたdenoisedと遅れていないhighpassedを直接加算しており、0<mix<1の間は事実上10ms遅延のコムフィルタになっている(50/150/250Hz…に周期100Hzのノッチ列)。低い声(f0=100〜120Hz)ではこのノッチ列が基音・倍音と重なりやすく、「遠い・こもる」印象の直接原因と判断した。またmixがtransient_scoreにより毎フレーム変動するため、コムの深さも揺れ続ける(フランジャー的な音色変化)。
+2. **ゲートのヒステリシス欠如+完全ミュート+フレーム境界の波形不連続**: `SpeechProbabilityGate`は発話確率の生値を毎フレーム閾値と比較する2値判定(ヒステリシスなし)で、閉じる先が完全な無音(0.0)、かつゲインをフレーム単位のステップ(フレーム内で一定)で適用している。低い声・小さい声で発話確率が閾値付近を振動すると、頻繁な開閉・完全な音の消失・フレーム境界でのクリックが同時に起き、これが「プツプツ途切れる」の最有力機構と判断した。
+3. **Compressorにメイクアップゲインが無く、AGCの収束が遅すぎる**: `pedalboard.Compressor`のソース(pedalboard/plugins/Compressor.h)を確認した結果、メイクアップゲイン機構は存在しない。圧縮による音量低下を補償する唯一の手段であるAGCが、既定でattack 2.0秒/release 4.0秒という遅い時定数を持ち、数秒の発話区間内では正しい目標音量に収束しきらない。これが「十分な声量でも遠く/小さく聞こえる」の直接原因と判断した。
+
+### 決定
+Plannerの計画(実装計画全文はセッション記録・エージェント成果物として保存、要点のみ本エントリに記載)を採用し、以下をManagerとして承認した。
+
+1. **dry/wetパスの時間整列**: RNNoiseの実測遅延(Step 0-Aで確認)が480サンプル(1フレーム)であれば、dry側に1フレームの遅延バッファを挿入して整列させる。TransientDetectorも整列後のdry信号に対して計算する。
+2. **ゲートを完全ミュート→フロア付きダッキングへ変更**: 発話状態の判定にヒステリシス(開く閾値と閉じる閾値を分ける、閉じ閾値=開く閾値×0.5)とhangover(200ms、閾値を割ってもすぐには閉じない)を導入し、発話状態を`SpeechActivityTracker`としてAGC・ゲートで共有する(現状2箇所に分散した閾値判定の一元化)。ゲートの閉時ターゲットは完全無音(0.0)ではなく`GATE_FLOOR_DB=-18.0dB`とし、ゲインもフレーム内で線形ランプさせ波形の不連続(クリック)を無くす。
+3. **AGCの時定数短縮**: 既定attack/releaseを2.0秒/4.0秒→0.4秒/1.5秒へ短縮し、数秒の発話内で目標音量へ収束できるようにする。発話状態の判定はSpeechActivityTrackerに一元化し、`freeze_speech_prob_threshold`(AGC独自の0.3判定)は削除する。
+4. **デフォルトプリセットの再調整**: `noise="strong"`は維持しつつ(バックグラウンドノイズを積極的に抑えるというユーザー要求自体は妥当)、`background_wet_dry_mix`を1.00から実測(Step 0-E、声帯域損失2.0dB以下かつノイズ単独減衰12dB以上を満たす最大値、推奨初期値0.85)に基づき引き下げる。`standard`も連動して0.80→0.75程度に調整する。noiseレベルを"standard"へ格下げする案は不採用(ユーザーは「バックグラウンドノイズは抑える」ことを明示的に要求しており、mix値の適正化で解決を図る方が要求に忠実)。
+5. **明瞭度strongのEQ低域カットを緩和**: 現行(highpass 90Hz, 200Hz -4.0dB, 300Hz -2.5dB)は低い声の厚みを削りすぎている。highpass 80Hz, 200Hz -2.0dB, 300Hz -1.5dB程度へ緩和する(実測Step 0-Gで確定)。既存テストが依存する「strongはweak/standardより強くEQをかける」という大小関係を壊さないよう、`standard`段も連動して緩和する(hp75, 200Hz -1.5dB, 300Hz -1.0dB目安)。
+6. **副次的に発見されたバグの修正**: (a) 詳細設定スライダーを操作するたびに`VoiceChain.set_agc`/`set_noise_stage`がAGC/ゲートのインスタンスを作り直し、内部状態(ゲイン・エンベロープ)がリセットされ、声が一瞬消えて数秒かけて音量が戻る問題。`set_params`方式に変更し既存インスタンスの状態を保持する。(b) `gui/app.py`の詳細設定スライダー変更が`AgcParams`をattack/release抜きで再構築しており、スライダー操作後にAGCがプリセット既定のattack/releaseから外れる問題(`dataclasses.replace`を使うよう修正)。(c) ジッタバッファに起動時のprefill(priming)が無く、起動直後・クロックドリフト時に周期的な無音挿入が起きうる問題(独立した変更として追加、リスクが高いと判明した場合は単独で見送り可能な設計とする)。
+7. **遅延の増加を許容**: dry/wet整列で+10ms、jitter buffer primingで最大+20ms、合計+10〜30msの追加遅延を許容する(Discordの通話遅延・既存のジッタバッファ40msに対して許容範囲と判断)。実機での体感確認は`WINDOWS_VERIFICATION_CHECKLIST.md`に追記する。
+8. **UIの詳細設定文言(D-010確定表)は変更しない**: ゲートのフロア/ヒステリシス/hangover、AGCの時定数はスライダー化しない(内部定数)。`noise_background_mix`スライダーの意味・範囲・説明文は変更なし(既定値のみ1.00→0.85相当に変わる)。
+
+### 理由
+- 「バグは根本原因を直す」(AGENTS.md)に従い、症状(声の途切れ・遠さ)ではなく、コムフィルタ・ゲートのヒステリシス欠如・AGCの収束遅延という構造上の原因に対処する。単純な数値調整のみでは(例えばbackground_wet_dry_mixを下げるだけでは)コムフィルタとゲートの根本問題は残るため、ユーザーが要求した「構造全体の再検証」に応える。
+- 判定ラダーに従い、メイクアップゲイン段の新規追加(責務が曖昧になる)は不採用とし、AGCの高速化のみで対応する。新規外部ライブラリの追加はpedalboard/RNNoiseの範囲内で解決できたため不要と判断した。
+- noiseレベルを"standard"へ格下げする案より、"strong"のmix値を実測ベースで適正化する案を採用した理由は、ユーザーが「バックグラウンドノイズ：中〜強」を基本方針として明示しているため。
+
+### 影響
+- 変更対象: `app/soloclarity/dsp/chain.py`、`app/soloclarity/dsp/gate.py`、`app/soloclarity/dsp/agc.py`、`app/soloclarity/presets.py`、`app/soloclarity/gui/app.py`、`app/soloclarity/audio/engine.py`、および対応するテスト群(`test_chain.py`, `test_gate.py`, `test_agc.py`, `test_engine.py`, 新規`test_rnnoise_wrapper.py`)。
+- `SpeechProbabilityGate.apply()`・`AutomaticGainControl.process()`のシグネチャが`speech_prob: float`→`speech_active: bool`へ変更される(呼び出し元は`VoiceChain`のみのため後方互換は取らない)。
+- 出力遅延が最大+10〜30ms増加する(セクション7参照)。
+- バージョンは1.3.0(minor)とする(処理チェーンの構造変更・既定プリセット値の変更を含むため)。
+- 実装はDeveloperへ委任し、Step 0の実測→構造修正→パラメータ確定→16シナリオの敵対的検証テスト→Reviewer検証→ビルドの順で進める。
